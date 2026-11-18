@@ -1,4 +1,5 @@
 import { GraphNode, GraphRenderer } from "../types";
+import { CircularLayoutEngine } from "./CircularLayout";
 
 export interface NodePositionChange {
   id: string;
@@ -20,11 +21,13 @@ export class AlignmentEngine {
       const prevX = node.x;
       const prevY = node.y;
       node.y = avgY;
+      node.fx = node.x;
       node.fy = avgY;
       node.vy = 0;
       changes.push({ id: node.id, prevX, prevY, newX: node.x, newY: avgY });
     }
 
+    CircularLayoutEngine.syncNodesToWorker(renderer, nodes, true);
     if (renderer.changed) renderer.changed();
     return changes;
   }
@@ -41,10 +44,12 @@ export class AlignmentEngine {
       const prevY = node.y;
       node.x = avgX;
       node.fx = avgX;
+      node.fy = node.y;
       node.vx = 0;
       changes.push({ id: node.id, prevX, prevY, newX: avgX, newY: node.y });
     }
 
+    CircularLayoutEngine.syncNodesToWorker(renderer, nodes, true);
     if (renderer.changed) renderer.changed();
     return changes;
   }
@@ -69,60 +74,13 @@ export class AlignmentEngine {
       changes.push({ id: node.id, prevX, prevY, newX: snappedX, newY: snappedY });
     }
 
-    if (renderer.changed) renderer.changed();
-    return changes;
-  }
-
-  public static distributeHorizontally(renderer: GraphRenderer, nodes: GraphNode[]): NodePositionChange[] {
-    if (!nodes || nodes.length <= 2) return [];
-
-    const sorted = [...nodes].sort((a, b) => a.x - b.x);
-    const minX = sorted[0].x;
-    const maxX = sorted[sorted.length - 1].x;
-    const step = (maxX - minX) / (sorted.length - 1);
-    const changes: NodePositionChange[] = [];
-
-    for (let i = 0; i < sorted.length; i++) {
-      const node = sorted[i];
-      const prevX = node.x;
-      const prevY = node.y;
-      const targetX = Math.round((minX + i * step) * 10) / 10;
-
-      node.x = targetX;
-      node.fx = targetX;
-      node.vx = 0;
-
-      changes.push({ id: node.id, prevX, prevY, newX: targetX, newY: node.y });
-    }
-
-    if (renderer.changed) renderer.changed();
-    return changes;
-  }
-
-  public static moveSelection(renderer: GraphRenderer, nodes: GraphNode[], dx: number, dy: number): NodePositionChange[] {
-    if (!nodes || nodes.length === 0) return [];
-    const changes: NodePositionChange[] = [];
-
-    for (const node of nodes) {
-      const prevX = node.x;
-      const prevY = node.y;
-      const nx = node.x + dx;
-      const ny = node.y + dy;
-
-      node.x = nx;
-      node.y = ny;
-      if (node.fx != null) node.fx = nx;
-      if (node.fy != null) node.fy = ny;
-
-      changes.push({ id: node.id, prevX, prevY, newX: nx, newY: ny });
-    }
-
+    CircularLayoutEngine.syncNodesToWorker(renderer, nodes, true);
     if (renderer.changed) renderer.changed();
     return changes;
   }
 
   public static toggleLock(renderer: GraphRenderer, nodes: GraphNode[], lock: boolean): void {
-    if (!nodes) return;
+    if (!nodes || nodes.length === 0) return;
     for (const node of nodes) {
       if (lock) {
         node.fx = node.x;
@@ -134,6 +92,7 @@ export class AlignmentEngine {
         node.fy = null;
       }
     }
+    CircularLayoutEngine.syncNodesToWorker(renderer, nodes, lock);
     if (renderer.changed) renderer.changed();
   }
 }

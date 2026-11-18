@@ -1,5 +1,6 @@
-import { GraphRenderer } from "../types";
+import { GraphNode, GraphRenderer } from "../types";
 import { NodePositionChange } from "../layout/AlignmentEngine";
+import { CircularLayoutEngine } from "../layout/CircularLayout";
 
 export class DeltaHistoryManager {
   private undoStack: NodePositionChange[][] = [];
@@ -16,7 +17,7 @@ export class DeltaHistoryManager {
     if (this.undoStack.length > this.maxDepth) {
       this.undoStack.shift();
     }
-    this.redoStack = []; // Clear redo on new action
+    this.redoStack = [];
   }
 
   public canUndo(): boolean {
@@ -31,6 +32,7 @@ export class DeltaHistoryManager {
     const action = this.undoStack.pop();
     if (!action || !renderer || !renderer.nodeLookup) return false;
 
+    const updatedNodes: GraphNode[] = [];
     for (const change of action) {
       const node = renderer.nodeLookup[change.id];
       if (node) {
@@ -38,10 +40,12 @@ export class DeltaHistoryManager {
         node.y = change.prevY;
         if (node.fx != null) node.fx = change.prevX;
         if (node.fy != null) node.fy = change.prevY;
+        updatedNodes.push(node);
       }
     }
 
     this.redoStack.push(action);
+    CircularLayoutEngine.syncNodesToWorker(renderer, updatedNodes, true);
     if (renderer.changed) renderer.changed();
     return true;
   }
@@ -50,6 +54,7 @@ export class DeltaHistoryManager {
     const action = this.redoStack.pop();
     if (!action || !renderer || !renderer.nodeLookup) return false;
 
+    const updatedNodes: GraphNode[] = [];
     for (const change of action) {
       const node = renderer.nodeLookup[change.id];
       if (node) {
@@ -57,10 +62,12 @@ export class DeltaHistoryManager {
         node.y = change.newY;
         if (node.fx != null) node.fx = change.newX;
         if (node.fy != null) node.fy = change.newY;
+        updatedNodes.push(node);
       }
     }
 
     this.undoStack.push(action);
+    CircularLayoutEngine.syncNodesToWorker(renderer, updatedNodes, true);
     if (renderer.changed) renderer.changed();
     return true;
   }

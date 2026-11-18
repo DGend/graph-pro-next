@@ -56,27 +56,28 @@ export class GraphToolbarManager {
     this.toolbarEl = document.createElement("div");
     this.toolbarEl.className = "graph-pro-next-toolbar";
 
-    // 1. Active File Title Badge
     this.titleBadgeEl = document.createElement("span");
     this.titleBadgeEl.className = "graph-pro-title";
     this.titleBadgeEl.textContent = "📄 " + this.getShortName(this.callbacks.getActiveFilePath());
     this.toolbarEl.appendChild(this.titleBadgeEl);
 
-    // 2. Selection Count Badge
     this.statsBadgeEl = document.createElement("span");
     this.statsBadgeEl.className = "graph-pro-badge";
     this.statsBadgeEl.textContent = "선택: 0";
     this.toolbarEl.appendChild(this.statsBadgeEl);
 
-    // 3. Center & Orbit Button
-    this.addButton("🎯 중심·원형 (F)", "현재 페이지를 정중앙에 고정하고 주변 노드를 원형으로 즉시 배치 (단축키: F / Space)", () => {
-      this.callbacks.centerAndOrbitOnActive(true);
-    }, true);
+    this.addButton(
+      "🎯 중심·원형 (F)",
+      "현재 페이지를 정중앙에 고정하고 주변 노드를 원형으로 즉시 배치 (단축키: F / Space)",
+      () => {
+        this.callbacks.centerAndOrbitOnActive(true);
+      },
+      true
+    );
 
-    // 4. Orbit Lock Toggle
     this.orbitBtnEl = this.addButton(
       this.callbacks.isCircularLocked() ? "⭕ 원형고정: ON" : "✨ 자유물리: ON",
-      "원형 궤도 고정(CPU 0% 절전) <-> D3 자유 물리 시뮬레이션 전환 (단축키: O)",
+      "원형 궤도 고정 <-> D3 자유 물리 시뮬레이션 전환 (단축키: O)",
       () => {
         this.callbacks.toggleCircularLocked();
         this.refreshState();
@@ -84,7 +85,6 @@ export class GraphToolbarManager {
       this.callbacks.isCircularLocked()
     );
 
-    // 5. Auto-Follow Toggle
     this.followBtnEl = this.addButton(
       this.callbacks.isAutoFollow() ? "📌 자동추적: ON" : "⏸️ 자동추적: OFF",
       "노트 이동 시 자동으로 그래프 중심 및 원형 배치 수행",
@@ -95,8 +95,7 @@ export class GraphToolbarManager {
       this.callbacks.isAutoFollow()
     );
 
-    // 6. Selected Circle Arrange
-    this.addButton("⭕ 선택원형", "Shift+드래그로 선택한 노드들을 원형 배치 (미선택 시 전체 원형 배치)", () => {
+    this.addButton("⭕ 선택원형", "Shift+드래그로 선택한 노드들을 원형 배치", () => {
       const renderer = this.callbacks.getRenderer();
       if (!renderer) return;
       const selected = this.callbacks.getSelectedNodes();
@@ -106,7 +105,6 @@ export class GraphToolbarManager {
           centerNodeId: activeFile || undefined,
           baseRadius: 180,
           lockPositions: true,
-          freezeSimulation: true,
         });
         this.history.recordChange(res.changed);
         new Notice(`🎯 선택된 ${selected.length}개 노드 원형 정렬 완료`);
@@ -115,12 +113,10 @@ export class GraphToolbarManager {
       }
     });
 
-    // 7. Alignments & Grid
     this.addButton("↔️ 수평", "선택 노드 수평 일직선 정렬", () => {
       const renderer = this.callbacks.getRenderer();
       const selected = this.callbacks.getSelectedNodes();
       if (!renderer || selected.length <= 1) return;
-      CircularLayoutEngine.freezeSimulation(renderer);
       this.history.recordChange(AlignmentEngine.alignHorizontal(renderer, selected));
     });
 
@@ -128,7 +124,6 @@ export class GraphToolbarManager {
       const renderer = this.callbacks.getRenderer();
       const selected = this.callbacks.getSelectedNodes();
       if (!renderer || selected.length <= 1) return;
-      CircularLayoutEngine.freezeSimulation(renderer);
       this.history.recordChange(AlignmentEngine.alignVertical(renderer, selected));
     });
 
@@ -136,11 +131,9 @@ export class GraphToolbarManager {
       const renderer = this.callbacks.getRenderer();
       const selected = this.callbacks.getSelectedNodes();
       if (!renderer || selected.length === 0) return;
-      CircularLayoutEngine.freezeSimulation(renderer);
       this.history.recordChange(AlignmentEngine.snapToGrid(renderer, selected, 50));
     });
 
-    // 8. Link Expansion
     this.addButton("⬅️ 역링크", "선택 노드의 역링크(Backlinks) 확장 선택", () => {
       const renderer = this.callbacks.getRenderer();
       const selected = this.callbacks.getSelectedNodes();
@@ -155,7 +148,6 @@ export class GraphToolbarManager {
       this.callbacks.setSelectedNodes(LinkExpansionEngine.selectOutgoingLinks(renderer, selected));
     });
 
-    // 9. Local Graph Depth (1 / 2 / 3)
     if (this.callbacks.getViewType() === "localgraph") {
       const curDepth = this.callbacks.getLocalDepth();
       for (const d of [1, 2, 3]) {
@@ -173,7 +165,6 @@ export class GraphToolbarManager {
       }
     }
 
-    // 10. Undo & Clear
     this.addButton("↩️ 취소", "이전 노드 배치로 되돌리기 (Ctrl+Z)", () => {
       const renderer = this.callbacks.getRenderer();
       if (renderer) this.history.undo(renderer);

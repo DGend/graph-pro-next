@@ -4,7 +4,7 @@ import { GraphProSettingsTab } from "./settings/SettingsTab";
 import { MarqueeSelectionManager } from "./selection/MarqueeSelection";
 import { GraphToolbarManager } from "./ui/GraphToolbar";
 import { DeltaHistoryManager } from "./history/DeltaHistory";
-import { CircularLayoutEngine } from "./layout/CircularLayout";
+import { CircularLayoutEngine, isSuperHubPath } from "./layout/CircularLayout";
 import { AlignmentEngine } from "./layout/AlignmentEngine";
 
 interface LeafEnhancement {
@@ -27,7 +27,6 @@ export default class GraphProNextPlugin extends Plugin {
     this.autoFollow = this.settings.autoCenterActiveNote;
     this.circularLocked = this.settings.autoCircularInLocalGraph;
 
-    CircularLayoutEngine.initWorker();
     this.addSettingTab(new GraphProSettingsTab(this.app, this));
 
     this.app.workspace.onLayoutReady(() => {
@@ -94,7 +93,6 @@ export default class GraphProNextPlugin extends Plugin {
             centerNodeId: this.activeFilePath || undefined,
             baseRadius: this.settings.defaultCircleRadius,
             lockPositions: true,
-            freezeSimulation: true,
           });
           this.history.recordChange(res.changed);
         } else if (this.activeFilePath) {
@@ -112,7 +110,6 @@ export default class GraphProNextPlugin extends Plugin {
         const enh = this.enhancedLeaves.get(active);
         const renderer = this.getRenderer(active);
         if (enh && renderer && enh.selectedNodes.length > 1) {
-          CircularLayoutEngine.freezeSimulation(renderer);
           this.history.recordChange(AlignmentEngine.alignHorizontal(renderer, enh.selectedNodes));
         }
       },
@@ -140,7 +137,6 @@ export default class GraphProNextPlugin extends Plugin {
   }
 
   onunload() {
-    CircularLayoutEngine.destroyWorker();
     for (const [_, enh] of this.enhancedLeaves) {
       for (const t of enh.timers) window.clearTimeout(t);
       enh.toolbar.destroy();
@@ -281,7 +277,7 @@ export default class GraphProNextPlugin extends Plugin {
             if (this.circularLocked && this.activeFilePath) {
               this.executeCenterAndOrbit(leaf, this.activeFilePath, true);
             } else {
-              CircularLayoutEngine.wakeSimulation(r, true);
+              CircularLayoutEngine.releaseAllLocks(r);
               new Notice("✨ 자유 물리 시뮬레이션 활성화");
             }
           }
@@ -307,8 +303,8 @@ export default class GraphProNextPlugin extends Plugin {
   }
 
   /**
-   * Non-blocking, zero-polling scheduler: executes immediately if nodes are ready,
-   * and schedules one lightweight follow-up after Obsidian finishes async node creation.
+   * Executes immediately if the target node is already in renderer.nodeLookup.
+   * Only schedules a single 70ms follow-up if Obsidian is still building the Local Graph nodes.
    */
   private scheduleCenterAndOrbit(leaf: WorkspaceLeaf, filePath: string, showNotice: boolean): void {
     const enh = this.enhancedLeaves.get(leaf);
@@ -319,18 +315,14 @@ export default class GraphProNextPlugin extends Plugin {
 
     const doneNow = this.executeCenterAndOrbit(leaf, filePath, showNotice);
 
-    if (enh) {
-      // Single lightweight follow-up at 60ms in case Obsidian recreated local graph nodes asynchronously
+    if (!doneNow && enh) {
       const t1 = window.setTimeout(() => {
-        this.executeCenterAndOrbit(leaf, filePath, !doneNow && showNotice);
-      }, 60);
+        this.executeCenterAndOrbit(leaf, filePath, showNotice);
+      }, 70);
       enh.timers.push(t1);
     }
   }
 
-  /**
-   * Executes circular layout and camera centering in a SINGLE frame (0ms polling).
-   */
   private executeCenterAndOrbit(leaf: WorkspaceLeaf, filePath: string, showNotice: boolean): boolean {
     const view = leaf.view as any;
     if (!view) return false;
@@ -338,15 +330,25 @@ export default class GraphProNextPlugin extends Plugin {
     const renderer = view.renderer as GraphRenderer;
     if (!renderer) return false;
 
-    // Ensure Local Graph tracks active file without triggering expensive search rebuilds
     if (vt === "localgraph" && view.engine?.options) {
+      // Prevent 4,000-paper master ledgers from blowing up multi-hop Local Graphs
+      const desiredSearch = isSuperHubPath(filePath)
+        ? "-file:_Review_Ledger"
+        : "-file:_Papers_Dashboard -file:_Review_Ledger -file:_Papers_Graph_Hub";
+
+      let needsRender = false;
+      if (view.engine.options.search !== desiredSearch) {
+        view.engine.options.search = desiredSearch;
+        needsRender = true;
+      }
       if (view.engine.options.localFile !== filePath) {
         const targetFile = this.app.vault.getAbstractFileByPath(filePath);
         if (targetFile) view.file = targetFile;
         view.engine.options.localFile = filePath;
-        if (typeof view.engine.render === "function") {
-          view.engine.render();
-        }
+        needsRender = true;
+      }
+      if (needsRender && typeof view.engine.render === "function") {
+        view.engine.render();
       }
     }
 
@@ -356,28 +358,29 @@ export default class GraphProNextPlugin extends Plugin {
 
     if (!node) return false;
 
-    // Apply 1-pass analytical circular layout around active center node
     if (vt === "localgraph") {
-      CircularLayoutEngine.arrangeConcentricAroundCenter(
+      CircularLayoutEngine.arrangeLocalGraphConcentric(
         renderer,
         filePath,
         this.settings.defaultCircleRadius,
         this.circularLocked
       );
     } else if (vt === "graph" && this.circularLocked && showNotice) {
-      // In Global Graph, when user explicitly triggers Center & Orbit (F), arrange 1-hop neighbors in a circle
-      const neighborhood = this.getDirectNeighborhood(renderer, node, filePath);
-      if (neighborhood.length > 1) {
-        CircularLayoutEngine.arrangeInCircle(renderer, neighborhood, {
-          centerNodeId: filePath,
-          baseRadius: this.settings.defaultCircleRadius,
-          lockPositions: true,
-          freezeSimulation: true,
-        });
+      // In Global Graph, only arrange in circle if active note is NOT a 4,000-node master hub
+      if (!isSuperHubPath(filePath)) {
+        const neighborhood = CircularLayoutEngine.getCleanNeighborhood(renderer, node, filePath, 50);
+        if (neighborhood.length > 1 && neighborhood.length <= 51) {
+          const res = CircularLayoutEngine.arrangeInCircle(renderer, neighborhood, {
+            centerNodeId: filePath,
+            baseRadius: this.settings.defaultCircleRadius,
+            lockPositions: true,
+          });
+          this.history.recordChange(res.changed);
+        }
       }
     }
 
-    // Instantaneous 1-frame camera centering (zero requestAnimationFrame loops)
+    // Instantaneous 1-frame camera centering (DO NOT set renderer.highlightNode!)
     const dpr = window.devicePixelRatio || 1;
     const width = renderer.width || view.contentEl?.clientWidth || 600;
     const height = renderer.height || view.contentEl?.clientHeight || 400;
@@ -405,9 +408,12 @@ export default class GraphProNextPlugin extends Plugin {
     renderer.panvX = 0;
     renderer.panvY = 0;
     renderer.targetScale = desiredScale;
+    // Ensure highlightNode is cleared so Obsidian's WebGL renderer can enter 0% GPU idle sleep
+    if (renderer.highlightNode) {
+      renderer.highlightNode = null;
+    }
     if (renderer.setScale) renderer.setScale(desiredScale);
     if (renderer.setPan) renderer.setPan(targetPanX, targetPanY);
-    renderer.highlightNode = node;
     if (renderer.changed) renderer.changed();
 
     if (showNotice) {
@@ -415,27 +421,6 @@ export default class GraphProNextPlugin extends Plugin {
       new Notice(`🎯 중심·원형 정렬 완료: ${shortName}`, 1500);
     }
     return true;
-  }
-
-  private getDirectNeighborhood(renderer: GraphRenderer, centerNode: GraphNode, centerId: string): GraphNode[] {
-    const result: GraphNode[] = [centerNode];
-    const seen = new Set<string>([centerId]);
-    const links = renderer.links || [];
-    for (let i = 0, len = links.length; i < len; i++) {
-      const l = links[i];
-      const sId = typeof l.source === "string" ? l.source : l.source?.id || l.source?.path || "";
-      const tId = typeof l.target === "string" ? l.target : l.target?.id || l.target?.path || "";
-      if (sId === centerId && tId && !seen.has(tId)) {
-        seen.add(tId);
-        const n = renderer.nodeLookup ? renderer.nodeLookup[tId] : undefined;
-        if (n) result.push(n);
-      } else if (tId === centerId && sId && !seen.has(sId)) {
-        seen.add(sId);
-        const n = renderer.nodeLookup ? renderer.nodeLookup[sId] : undefined;
-        if (n) result.push(n);
-      }
-    }
-    return result;
   }
 
   private highlightNodes(renderer: GraphRenderer, selected: GraphNode[]): void {
@@ -462,7 +447,6 @@ export default class GraphProNextPlugin extends Plugin {
       return;
     }
 
-    // Alt + G -> Open or focus Local Graph
     if (evt.altKey && !evt.ctrlKey && !evt.shiftKey && evt.code === "KeyG") {
       evt.preventDefault();
       evt.stopPropagation();
@@ -493,7 +477,7 @@ export default class GraphProNextPlugin extends Plugin {
           if (this.circularLocked && this.activeFilePath) {
             this.executeCenterAndOrbit(active, this.activeFilePath, true);
           } else {
-            CircularLayoutEngine.wakeSimulation(renderer, true);
+            CircularLayoutEngine.releaseAllLocks(renderer);
           }
         }
       } else if (
@@ -516,7 +500,6 @@ export default class GraphProNextPlugin extends Plugin {
       return;
     }
 
-    // Ctrl+Z -> Undo
     if ((evt.ctrlKey || evt.metaKey) && !evt.shiftKey && evt.code === "KeyZ") {
       if (this.history.canUndo()) {
         evt.preventDefault();
