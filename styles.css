@@ -1,0 +1,71 @@
+/* GraphPro-Next Overlay Styles */
+
+.graph-pro-next-toolbar {
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  z-index: 40;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: var(--background-secondary-alt, rgba(30, 30, 38, 0.9));
+  border: 1px solid var(--background-modifier-border, rgba(140, 140, 170, 0.28));
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.32);
+  backdrop-filter: blur(10px);
+  user-select: none;
+}
+
+.graph-pro-badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 7px;
+  border-radius: 5px;
+  background: var(--background-modifier-hover);
+  color: var(--text-muted);
+  transition: all 0.15s ease;
+}
+
+.graph-pro-badge.is-active {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent, #ffffff);
+}
+
+.graph-pro-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 4px 8px;
+  border-radius: 5px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  color: var(--text-normal);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.12s ease;
+}
+
+.graph-pro-btn:hover {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent, #ffffff);
+  border-color: var(--interactive-accent);
+  transform: translateY(-1px);
+}
+
+.graph-pro-btn:active {
+  transform: translateY(0);
+}
+
+/* Marquee Selection Rectangle (Shift + Drag) */
+.graph-pro-next-marquee {
+  position: absolute;
+  pointer-events: none;
+  z-index: 999;
+  border: 1.5px dashed var(--interactive-accent, #705dcf);
+  background: rgba(112, 93, 207, 0.15);
+  box-shadow: 0 0 10px rgba(112, 93, 207, 0.25);
+  border-radius: 4px;
+}

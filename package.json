@@ -1,0 +1,29 @@
+{
+  "name": "graph-pro-next",
+  "version": "1.0.0",
+  "description": "Next-Generation High-Performance Graph View Controls, Marquee Selection, Multi-Ring Orbital Layouts & Delta Undo/Redo for Obsidian",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc -noEmit && node esbuild.config.mjs production"
+  },
+  "keywords": [
+    "obsidian",
+    "obsidian-plugin",
+    "graph-view",
+    "knowledge-graph",
+    "circular-layout",
+    "marquee-selection",
+    "high-performance"
+  ],
+  "author": "Ki-Hwan Kim & Antigravity (Original High-Performance Graph Suite)",
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "@types/node": "^22.8.0",
+    "builtin-modules": "^4.0.0",
+    "esbuild": "^0.24.0",
+    "obsidian": "latest",
+    "tslib": "^2.8.0",
+    "typescript": "^5.6.3"
+  }
+}

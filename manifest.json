@@ -1,0 +1,10 @@
+{
+  "id": "graph-pro-next",
+  "name": "GraphPro-Next",
+  "version": "1.0.0",
+  "minAppVersion": "1.0.0",
+  "description": "Next-generation high-performance graph view controls, marquee selection, multi-ring orbital layouts & delta undo/redo.",
+  "author": "Ki-Hwan Kim & Antigravity ",
+  "authorUrl": "https://github.com/DGend",
+  "isDesktopOnly": false
+}
