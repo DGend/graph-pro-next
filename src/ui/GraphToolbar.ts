@@ -18,8 +18,8 @@ export interface ToolbarCallbacks {
   toggleAutoFollow: () => void;
   isCircularLocked: () => boolean;
   toggleCircularLocked: () => void;
-  setLocalDepth: (depth: number) => void;
-  getLocalDepth: () => number;
+  setHopDepth: (depth: number) => void;
+  getHopDepth: () => number;
 }
 
 export class GraphToolbarManager {
@@ -69,12 +69,37 @@ export class GraphToolbarManager {
 
     this.addButton(
       "🎯 중심·원형 (F)",
-      "현재 페이지를 정중앙에 고정하고 주변 노드를 원형으로 즉시 배치 (단축키: F / Space)",
+      "현재 페이지를 정중앙에 고정하고 설정된 홉(1~3홉) 범위만 동심원으로 즉시 배치 (단축키: F / Space)",
       () => {
         this.callbacks.centerAndOrbitOnActive(true);
       },
       true
     );
+
+    // Hop Depth Selector (1홉 / 2홉 / 3홉 / 전체) - Always available in both Local and Global Graph!
+    const curDepth = this.callbacks.getHopDepth();
+    const hopOptions: Array<{ depth: number; label: string; desc: string }> = [
+      { depth: 1, label: "1홉", desc: "현재 페이지와 직접(1차) 연결된 페이지만 원형으로 표시 (단축키: 1)" },
+      { depth: 2, label: "2홉", desc: "현재 페이지 + 1차(내원) + 2차(외원) 연결 페이지까지 2단 동심원으로 표시 (단축키: 2)" },
+      { depth: 3, label: "3홉", desc: "현재 페이지 + 1차 + 2차 + 3차 연결 페이지까지 3단 동심원으로 표시 (단축키: 3)" },
+    ];
+    if (this.callbacks.getViewType() === "graph") {
+      hopOptions.push({ depth: 0, label: "🌐 전체", desc: "홉 필터 해제 및 볼트 전체 노드 표시" });
+    }
+
+    for (const opt of hopOptions) {
+      const b = this.addButton(
+        opt.label,
+        opt.desc,
+        () => {
+          this.callbacks.setHopDepth(opt.depth);
+          this.refreshState();
+        },
+        curDepth === opt.depth
+      );
+      b.dataset.depth = String(opt.depth);
+      this.depthBtns.push(b);
+    }
 
     this.orbitBtnEl = this.addButton(
       this.callbacks.isCircularLocked() ? "⭕ 원형고정: ON" : "✨ 자유물리: ON",
@@ -96,26 +121,7 @@ export class GraphToolbarManager {
       this.callbacks.isAutoFollow()
     );
 
-    this.addButton("⭕ 선택원형", "선택한 노드(미선택 시 현재 페이지 주변 노드)를 원형으로 정렬", () => {
-      const renderer = this.callbacks.getRenderer();
-      if (!renderer) return;
-      const selected = this.callbacks.getSelectedNodes();
-      const activeFile = this.callbacks.getActiveFilePath();
-      if (selected.length > 1) {
-        const res = CircularLayoutEngine.arrangeInCircle(renderer, selected, {
-          centerNodeId: activeFile || undefined,
-          baseRadius: 180,
-          lockPositions: true,
-        });
-        this.history.recordChange(res.changed);
-        this.callbacks.fitCameraToNodes(selected, activeFile);
-        new Notice(`⭕ 선택된 ${selected.length}개 노드 원형 정렬 완료`);
-      } else {
-        this.callbacks.centerAndOrbitOnActive(true);
-      }
-    });
-
-    this.addButton("↔️ 수평", "선택 노드(미선택 시 현재 페이지와 연결 노드)를 수평 일직선 행(Row)으로 정렬", () => {
+    this.addButton("↔️ 수평", "표시된 노드(또는 선택 노드)를 수평 일직선 행(Row)으로 정렬", () => {
       const renderer = this.callbacks.getRenderer();
       if (!renderer) return;
       const activeFile = this.callbacks.getActiveFilePath();
@@ -135,7 +141,7 @@ export class GraphToolbarManager {
       new Notice(`↔️ ${targets.length}개 노드 수평 정렬 완료`);
     });
 
-    this.addButton("↕️ 수직", "선택 노드(미선택 시 현재 페이지와 연결 노드)를 수직 일직선 열(Column)로 정렬", () => {
+    this.addButton("↕️ 수직", "표시된 노드(또는 선택 노드)를 수직 일직선 열(Column)로 정렬", () => {
       const renderer = this.callbacks.getRenderer();
       if (!renderer) return;
       const activeFile = this.callbacks.getActiveFilePath();
@@ -155,7 +161,7 @@ export class GraphToolbarManager {
       new Notice(`↕️ ${targets.length}개 노드 수직 정렬 완료`);
     });
 
-    this.addButton("🔲 그리드", "선택 노드(미선택 시 현재 페이지와 연결 노드)를 바둑판 격자 행렬로 정렬", () => {
+    this.addButton("🔲 그리드", "표시된 노드(또는 선택 노드)를 바둑판 격자 행렬로 정렬", () => {
       const renderer = this.callbacks.getRenderer();
       if (!renderer) return;
       const activeFile = this.callbacks.getActiveFilePath();
@@ -211,23 +217,6 @@ export class GraphToolbarManager {
       this.callbacks.fitCameraToNodes(res.nodes, activeFile);
       new Notice(`➡️ 후속링크 ${res.nodes.length - 1}개 선택 및 우측 호 정렬 완료`);
     });
-
-    if (this.callbacks.getViewType() === "localgraph") {
-      const curDepth = this.callbacks.getLocalDepth();
-      for (const d of [1, 2, 3]) {
-        const b = this.addButton(
-          `${d}홉`,
-          `로컬 그래프 탐색 깊이 ${d}단계 (단축키: ${d})`,
-          () => {
-            this.callbacks.setLocalDepth(d);
-            this.refreshState();
-          },
-          curDepth === d
-        );
-        b.dataset.depth = String(d);
-        this.depthBtns.push(b);
-      }
-    }
 
     this.addButton("↩️ 취소", "이전 노드 배치로 되돌리기 (Ctrl+Z)", () => {
       const renderer = this.callbacks.getRenderer();
@@ -291,7 +280,7 @@ export class GraphToolbarManager {
       this.orbitBtnEl.classList.toggle("is-active", on);
     }
     if (this.depthBtns.length > 0) {
-      const cur = this.callbacks.getLocalDepth();
+      const cur = this.callbacks.getHopDepth();
       for (const b of this.depthBtns) {
         b.classList.toggle("is-active", Number(b.dataset.depth) === cur);
       }

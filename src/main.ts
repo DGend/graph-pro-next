@@ -21,11 +21,13 @@ export default class GraphProNextPlugin extends Plugin {
   private activeFilePath: string | null = null;
   private autoFollow = true;
   private circularLocked = true;
+  private hopDepth = 1;
 
   async onload() {
     await this.loadSettings();
     this.autoFollow = this.settings.autoCenterActiveNote;
     this.circularLocked = this.settings.autoCircularInLocalGraph;
+    this.hopDepth = this.settings.defaultHopDepth || 1;
 
     this.addSettingTab(new GraphProSettingsTab(this.app, this));
 
@@ -40,7 +42,7 @@ export default class GraphProNextPlugin extends Plugin {
           this.activeFilePath = file.path;
           this.refreshAllToolbars();
           if (this.autoFollow) {
-            this.centerAllGraphs(file.path, false);
+            this.centerAllGraphs(file.path, false, true);
           }
         }
       })
@@ -56,7 +58,7 @@ export default class GraphProNextPlugin extends Plugin {
         } else if (vt === "graph" || vt === "localgraph") {
           this.enhanceLeaf(leaf);
           if (this.autoFollow && this.activeFilePath) {
-            this.scheduleCenterAndOrbit(leaf, this.activeFilePath, false);
+            this.scheduleCenterAndOrbit(leaf, this.activeFilePath, false, true);
           }
         }
       })
@@ -74,7 +76,7 @@ export default class GraphProNextPlugin extends Plugin {
       callback: () => {
         this.detectActiveFile();
         if (this.activeFilePath) {
-          this.centerAllGraphs(this.activeFilePath, true);
+          this.centerAllGraphs(this.activeFilePath, true, true);
         }
       },
     });
@@ -96,7 +98,7 @@ export default class GraphProNextPlugin extends Plugin {
           this.history.recordChange(res.changed);
           this.fitCameraToNodes(active, enh.selectedNodes, this.activeFilePath);
         } else if (this.activeFilePath) {
-          this.scheduleCenterAndOrbit(active, this.activeFilePath, true);
+          this.scheduleCenterAndOrbit(active, this.activeFilePath, true, false);
         }
       },
     });
@@ -191,7 +193,7 @@ export default class GraphProNextPlugin extends Plugin {
     for (const leaf of leaves) {
       this.enhanceLeaf(leaf);
       if (centerInitial && this.autoFollow && this.activeFilePath) {
-        this.scheduleCenterAndOrbit(leaf, this.activeFilePath, false);
+        this.scheduleCenterAndOrbit(leaf, this.activeFilePath, false, true);
       }
     }
   }
@@ -202,14 +204,51 @@ export default class GraphProNextPlugin extends Plugin {
     }
   }
 
-  private centerAllGraphs(filePath: string, showNotice: boolean): void {
+  private centerAllGraphs(filePath: string, showNotice: boolean, asyncChanged: boolean): void {
     const leaves = [
       ...this.app.workspace.getLeavesOfType("graph"),
       ...this.app.workspace.getLeavesOfType("localgraph"),
     ];
     for (const leaf of leaves) {
       this.enhanceLeaf(leaf);
-      this.scheduleCenterAndOrbit(leaf, filePath, showNotice);
+      this.scheduleCenterAndOrbit(leaf, filePath, showNotice, asyncChanged);
+    }
+  }
+
+  private applyHopDepthToLeaf(leaf: WorkspaceLeaf, depth: number): void {
+    this.hopDepth = depth;
+    this.settings.defaultHopDepth = depth;
+    this.saveSettings();
+    this.refreshAllToolbars();
+
+    const view = leaf.view as any;
+    const vt = view?.getViewType?.();
+    const renderer = this.getRenderer(leaf);
+
+    if (vt === "localgraph" && view.engine?.options) {
+      const targetJumps = Math.max(1, depth);
+      view.engine.options.localJumps = targetJumps;
+      view.engine.options.showTags = false;
+      view.engine.options.localInterlinks = false;
+      if (view.engine.filterOptions?.jumps?.setValue) {
+        view.engine.filterOptions.jumps.setValue(targetJumps);
+      }
+      if (typeof view.onOptionsChange === "function") {
+        view.onOptionsChange();
+      }
+      if (typeof view.engine.render === "function") {
+        view.engine.render();
+      }
+    } else if (vt === "graph" && depth === 0 && renderer) {
+      CircularLayoutEngine.showAllNodes(renderer);
+      CircularLayoutEngine.releaseAllLocks(renderer);
+      new Notice("🌐 전체 그래프 표시 모드");
+      return;
+    }
+
+    this.detectActiveFile();
+    if (this.activeFilePath) {
+      this.scheduleCenterAndOrbit(leaf, this.activeFilePath, true, true);
     }
   }
 
@@ -223,6 +262,11 @@ export default class GraphProNextPlugin extends Plugin {
 
     CircularLayoutEngine.ensureRendererPinHook(renderer);
 
+    // Sync initial depth from localgraph if present
+    if (view.getViewType() === "localgraph" && view.engine?.options?.localJumps) {
+      this.hopDepth = view.engine.options.localJumps;
+    }
+
     const containerEl = view.contentEl as HTMLElement;
 
     const enhancement: LeafEnhancement = {
@@ -234,9 +278,10 @@ export default class GraphProNextPlugin extends Plugin {
 
     enhancement.marquee = new MarqueeSelectionManager(containerEl, renderer, {
       onSelectionChanged: (nodes, _isFinal) => {
-        enhancement.selectedNodes = nodes;
-        enhancement.toolbar.updateSelectionCount(nodes.length);
-        this.highlightNodes(renderer, nodes);
+        const visibleOnly = nodes.filter((n) => n._hopVisible !== false);
+        enhancement.selectedNodes = visibleOnly;
+        enhancement.toolbar.updateSelectionCount(visibleOnly.length);
+        this.highlightNodes(renderer, visibleOnly);
       },
     });
 
@@ -264,7 +309,7 @@ export default class GraphProNextPlugin extends Plugin {
         centerAndOrbitOnActive: (showNotice) => {
           this.detectActiveFile();
           if (this.activeFilePath) {
-            this.scheduleCenterAndOrbit(leaf, this.activeFilePath, showNotice);
+            this.scheduleCenterAndOrbit(leaf, this.activeFilePath, showNotice, false);
           }
         },
         fitCameraToNodes: (nodes, centerId) => {
@@ -277,7 +322,7 @@ export default class GraphProNextPlugin extends Plugin {
           this.saveSettings();
           this.refreshAllToolbars();
           if (this.autoFollow && this.activeFilePath) {
-            this.scheduleCenterAndOrbit(leaf, this.activeFilePath, true);
+            this.scheduleCenterAndOrbit(leaf, this.activeFilePath, true, false);
           }
         },
         isCircularLocked: () => this.circularLocked,
@@ -297,18 +342,11 @@ export default class GraphProNextPlugin extends Plugin {
             }
           }
         },
-        setLocalDepth: (depth: number) => {
-          const eng = (leaf.view as any)?.engine;
-          if (eng && eng.options) {
-            eng.options.localJumps = depth;
-            if (typeof eng.render === "function") eng.render();
-            if (this.activeFilePath) {
-              this.scheduleCenterAndOrbit(leaf, this.activeFilePath, false);
-            }
-          }
+        setHopDepth: (depth: number) => {
+          this.applyHopDepthToLeaf(leaf, depth);
         },
-        getLocalDepth: () => {
-          return (leaf.view as any)?.engine?.options?.localJumps || 1;
+        getHopDepth: () => {
+          return this.hopDepth;
         },
       },
       this.history
@@ -323,10 +361,13 @@ export default class GraphProNextPlugin extends Plugin {
     const renderer = view.renderer as GraphRenderer;
     if (!renderer) return;
 
+    const visibleNodes = nodes.filter((n) => n._hopVisible !== false);
+    const targetList = visibleNodes.length > 0 ? visibleNodes : nodes;
+
     let cx = 0;
     let cy = 0;
     const centerNode = centerId
-      ? nodes.find((n) => (n.id || n.path) === centerId)
+      ? targetList.find((n) => (n.id || n.path) === centerId)
       : undefined;
 
     let minX = Infinity,
@@ -334,8 +375,8 @@ export default class GraphProNextPlugin extends Plugin {
       minY = Infinity,
       maxY = -Infinity;
 
-    for (let i = 0; i < nodes.length; i++) {
-      const n = nodes[i];
+    for (let i = 0; i < targetList.length; i++) {
+      const n = targetList[i];
       if (n.x < minX) minX = n.x;
       if (n.x > maxX) maxX = n.x;
       if (n.y < minY) minY = n.y;
@@ -354,11 +395,11 @@ export default class GraphProNextPlugin extends Plugin {
     const width = renderer.width || view.contentEl?.clientWidth || 600;
     const height = renderer.height || view.contentEl?.clientHeight || 400;
 
-    const spanX = Math.max(maxX - minX, 220);
-    const spanY = Math.max(maxY - minY, 220);
+    const spanX = Math.max(maxX - minX, 240);
+    const spanY = Math.max(maxY - minY, 240);
     const scaleX = (width * dpr * 0.68) / spanX;
     const scaleY = (height * dpr * 0.68) / spanY;
-    const desiredScale = Math.max(0.35, Math.min(1.4, Math.min(scaleX, scaleY)));
+    const desiredScale = Math.max(0.32, Math.min(1.38, Math.min(scaleX, scaleY)));
 
     const targetPanX = (width / 2) * dpr - cx * desiredScale;
     const targetPanY = (height / 2) * dpr - cy * desiredScale;
@@ -372,7 +413,16 @@ export default class GraphProNextPlugin extends Plugin {
     if (renderer.changed) renderer.changed();
   }
 
-  private scheduleCenterAndOrbit(leaf: WorkspaceLeaf, filePath: string, showNotice: boolean): void {
+  /**
+   * Executes immediately AND schedules follow-up passes at 65ms and 165ms whenever
+   * Obsidian's LocalGraph engine asynchronously updates its node set (e.g. on file switch or depth change).
+   */
+  private scheduleCenterAndOrbit(
+    leaf: WorkspaceLeaf,
+    filePath: string,
+    showNotice: boolean,
+    expectAsyncEngineUpdate = false
+  ): void {
     const enh = this.enhancedLeaves.get(leaf);
     if (enh) {
       for (const t of enh.timers) window.clearTimeout(t);
@@ -381,11 +431,14 @@ export default class GraphProNextPlugin extends Plugin {
 
     const doneNow = this.executeCenterAndOrbit(leaf, filePath, showNotice);
 
-    if (!doneNow && enh) {
+    if (enh && (!doneNow || expectAsyncEngineUpdate)) {
       const t1 = window.setTimeout(() => {
-        this.executeCenterAndOrbit(leaf, filePath, showNotice);
-      }, 70);
-      enh.timers.push(t1);
+        this.executeCenterAndOrbit(leaf, filePath, !doneNow && showNotice);
+      }, 65);
+      const t2 = window.setTimeout(() => {
+        this.executeCenterAndOrbit(leaf, filePath, false);
+      }, 165);
+      enh.timers.push(t1, t2);
     }
   }
 
@@ -401,9 +454,23 @@ export default class GraphProNextPlugin extends Plugin {
         ? "-file:_Review_Ledger"
         : "-file:_Papers_Dashboard -file:_Review_Ledger -file:_Papers_Graph_Hub";
 
+      const targetJumps = Math.max(1, this.hopDepth);
       let needsRender = false;
+
       if (view.engine.options.search !== desiredSearch) {
         view.engine.options.search = desiredSearch;
+        needsRender = true;
+      }
+      if (view.engine.options.showTags !== false) {
+        view.engine.options.showTags = false;
+        needsRender = true;
+      }
+      if (view.engine.options.localInterlinks !== false) {
+        view.engine.options.localInterlinks = false;
+        needsRender = true;
+      }
+      if (view.engine.options.localJumps !== targetJumps) {
+        view.engine.options.localJumps = targetJumps;
         needsRender = true;
       }
       if (view.engine.options.localFile !== filePath) {
@@ -412,8 +479,9 @@ export default class GraphProNextPlugin extends Plugin {
         view.engine.options.localFile = filePath;
         needsRender = true;
       }
-      if (needsRender && typeof view.engine.render === "function") {
-        view.engine.render();
+      if (needsRender) {
+        if (typeof view.onOptionsChange === "function") view.onOptionsChange();
+        if (typeof view.engine.render === "function") view.engine.render();
       }
     }
 
@@ -423,49 +491,30 @@ export default class GraphProNextPlugin extends Plugin {
 
     if (!node) return false;
 
-    if (vt === "localgraph") {
-      const changes = CircularLayoutEngine.arrangeLocalGraphConcentric(
-        renderer,
-        filePath,
-        this.settings.defaultCircleRadius,
-        this.circularLocked
-      );
-      if (showNotice && changes.length > 0) {
-        this.history.recordChange(changes);
-      }
-      this.fitCameraToNodes(leaf, renderer.nodes || [node], filePath);
-    } else if (vt === "graph") {
-      if (this.circularLocked && !isSuperHubPath(filePath)) {
-        const neighborhood = CircularLayoutEngine.getCleanNeighborhood(renderer, node, filePath, 50);
-        if (neighborhood.length > 1 && neighborhood.length <= 51) {
-          const res = CircularLayoutEngine.arrangeInCircle(renderer, neighborhood, {
-            centerNodeId: filePath,
-            baseRadius: this.settings.defaultCircleRadius,
-            lockPositions: true,
-          });
-          if (showNotice && res.changed.length > 0) {
-            this.history.recordChange(res.changed);
-          }
-          this.fitCameraToNodes(leaf, neighborhood, filePath);
-        } else {
-          this.fitCameraToNodes(leaf, [node], filePath);
-        }
-      } else {
-        this.fitCameraToNodes(leaf, [node], filePath);
-      }
+    // Apply strict BFS Hop Filtering (1홉 / 2홉 / 3홉 / 전체) & Concentric Rings in BOTH Local and Global Graph!
+    const effectiveHop = vt === "localgraph" ? Math.max(1, this.hopDepth) : this.hopDepth;
+    const res = CircularLayoutEngine.arrangeAndFilterByHopDepth(
+      renderer,
+      filePath,
+      effectiveHop,
+      this.settings.defaultCircleRadius,
+      this.circularLocked
+    );
+
+    if (showNotice && res.changes.length > 0) {
+      this.history.recordChange(res.changes);
     }
+
+    this.fitCameraToNodes(leaf, res.visibleNodes.length > 0 ? res.visibleNodes : [node], filePath);
 
     if (showNotice) {
       const shortName = filePath.split("/").pop()?.replace(/\.md$/i, "") || filePath;
-      new Notice(`🎯 중심·원형 정렬 완료: ${shortName}`, 1500);
+      const hopLabel = effectiveHop > 0 ? `${effectiveHop}홉 (${res.visibleNodes.length}개 노드)` : "전체";
+      new Notice(`🎯 [${hopLabel}] 중심·동심원 정렬: ${shortName}`, 1500);
     }
     return true;
   }
 
-  /**
-   * Visually highlights selected nodes on the PixiJS canvas using sprite tinting
-   * without touching `renderer.highlightNode` (preserving 0% GPU idle sleep).
-   */
   private highlightNodes(renderer: GraphRenderer, selected: GraphNode[]): void {
     if (!renderer) return;
     const selectedIds = new Set<string>();
@@ -481,7 +530,7 @@ export default class GraphProNextPlugin extends Plugin {
           if (n._origTint === undefined && n.circle.tint !== undefined) {
             n._origTint = n.circle.tint;
           }
-          n.circle.tint = 0x00ffd5; // Bright cyan-emerald highlight
+          n.circle.tint = 0x00ffd5;
         } else if (n._origTint !== undefined) {
           n.circle.tint = n._origTint;
           n._origTint = undefined;
@@ -520,7 +569,7 @@ export default class GraphProNextPlugin extends Plugin {
         evt.stopPropagation();
         this.detectActiveFile();
         if (this.activeFilePath) {
-          this.scheduleCenterAndOrbit(active, this.activeFilePath, true);
+          this.scheduleCenterAndOrbit(active, this.activeFilePath, true, false);
         }
       } else if (evt.code === "KeyO") {
         evt.preventDefault();
@@ -536,22 +585,11 @@ export default class GraphProNextPlugin extends Plugin {
             if (changes.length > 0) this.history.recordChange(changes);
           }
         }
-      } else if (
-        active.view.getViewType() === "localgraph" &&
-        (evt.code === "Digit1" || evt.code === "Digit2" || evt.code === "Digit3")
-      ) {
+      } else if (evt.code === "Digit1" || evt.code === "Digit2" || evt.code === "Digit3") {
         evt.preventDefault();
         evt.stopPropagation();
         const depth = parseInt(evt.code.replace("Digit", ""), 10);
-        const eng = (active.view as any)?.engine;
-        if (eng && eng.options) {
-          eng.options.localJumps = depth;
-          if (typeof eng.render === "function") eng.render();
-          if (this.activeFilePath) {
-            this.scheduleCenterAndOrbit(active, this.activeFilePath, false);
-          }
-        }
-        this.refreshAllToolbars();
+        this.applyHopDepthToLeaf(active, depth);
       }
       return;
     }
@@ -594,7 +632,7 @@ export default class GraphProNextPlugin extends Plugin {
     }
 
     this.enhanceLeaf(leaf);
-    this.scheduleCenterAndOrbit(leaf, this.activeFilePath, true);
+    this.scheduleCenterAndOrbit(leaf, this.activeFilePath, true, true);
   }
 
   async loadSettings() {

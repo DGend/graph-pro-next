@@ -1,6 +1,15 @@
+export interface PixiDisplayObject {
+  visible?: boolean;
+  renderable?: boolean;
+  alpha?: number;
+  tint?: number;
+  scale?: { x: number; y: number; set?: (x: number, y?: number) => void };
+}
+
 export interface GraphNode {
   id: string;
   path?: string;
+  type?: string;
   x: number;
   y: number;
   vx?: number;
@@ -10,25 +19,36 @@ export interface GraphNode {
   weight?: number;
   forward?: Record<string, any>;
   reverse?: Record<string, any>;
-  circle?: {
-    tint?: number;
-    alpha?: number;
-    scale?: { x: number; y: number; set?: (x: number, y?: number) => void };
-  };
+  circle?: PixiDisplayObject;
+  text?: PixiDisplayObject;
   _pinnedX?: number;
   _pinnedY?: number;
   _origTint?: number;
+  _hopVisible?: boolean;
+  _hopLevel?: number;
 }
 
 export interface GraphLink {
   source: string | GraphNode;
   target: string | GraphNode;
+  line?: PixiDisplayObject;
+  px?: PixiDisplayObject;
+  arrow?: PixiDisplayObject;
+  _linkVisible?: boolean;
 }
 
 export interface GraphRenderer {
   nodes?: GraphNode[];
   links?: GraphLink[];
   nodeLookup?: Record<string, GraphNode>;
+  px?: {
+    renderer?: {
+      on?: (event: string, fn: () => void) => void;
+    };
+    ticker?: {
+      add?: (fn: () => void) => void;
+    };
+  };
   hanger?: {
     localTransform?: {
       a: number;
@@ -51,12 +71,14 @@ export interface GraphRenderer {
   height?: number;
   highlightNode?: GraphNode | null;
   worker?: Worker;
+  renderCallback?: (...args: any[]) => any;
   setPan?: (x: number, y: number) => void;
   setScale?: (scale: number) => void;
   changed?: () => void;
   start?: () => void;
   stop?: () => void;
   _graphProHooked?: boolean;
+  _hopFilterActive?: boolean;
 }
 
 export interface NodePositionChange {
@@ -77,6 +99,7 @@ export interface PluginSettings {
   enableMarqueeSelection: boolean;
   autoCenterActiveNote: boolean;
   autoCircularInLocalGraph: boolean;
+  defaultHopDepth: number;
   historyMaxDepth: number;
 }
 
@@ -86,5 +109,6 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   enableMarqueeSelection: true,
   autoCenterActiveNote: true,
   autoCircularInLocalGraph: true,
+  defaultHopDepth: 1,
   historyMaxDepth: 30,
 };
