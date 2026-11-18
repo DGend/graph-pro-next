@@ -68,7 +68,6 @@ export default class GraphProNextPlugin extends Plugin {
       })
     );
 
-    // Commands
     this.addCommand({
       id: "graph-pro-center-and-orbit",
       name: "현재 페이지 중심 고정 및 주변 노드 원형 배치 (Center & Circular Orbit)",
@@ -95,6 +94,7 @@ export default class GraphProNextPlugin extends Plugin {
             lockPositions: true,
           });
           this.history.recordChange(res.changed);
+          this.fitCameraToNodes(active, enh.selectedNodes, this.activeFilePath);
         } else if (this.activeFilePath) {
           this.scheduleCenterAndOrbit(active, this.activeFilePath, true);
         }
@@ -103,14 +103,23 @@ export default class GraphProNextPlugin extends Plugin {
 
     this.addCommand({
       id: "graph-pro-align-horizontal",
-      name: "선택된 노드 수평 정렬 (Align Horizontal)",
+      name: "노드 수평 정렬 (Align Horizontal)",
       callback: () => {
         const active = this.getActiveGraphLeaf();
         if (!active) return;
         const enh = this.enhancedLeaves.get(active);
         const renderer = this.getRenderer(active);
-        if (enh && renderer && enh.selectedNodes.length > 1) {
-          this.history.recordChange(AlignmentEngine.alignHorizontal(renderer, enh.selectedNodes));
+        if (enh && renderer) {
+          const targets = CircularLayoutEngine.resolveTargetNodes(
+            renderer,
+            enh.selectedNodes,
+            this.activeFilePath,
+            active.view.getViewType()
+          );
+          if (targets.length > 1) {
+            this.history.recordChange(AlignmentEngine.alignHorizontal(renderer, targets, this.activeFilePath));
+            this.fitCameraToNodes(active, targets, this.activeFilePath);
+          }
         }
       },
     });
@@ -212,6 +221,8 @@ export default class GraphProNextPlugin extends Plugin {
     const renderer = view.renderer as GraphRenderer;
     if (!renderer) return;
 
+    CircularLayoutEngine.ensureRendererPinHook(renderer);
+
     const containerEl = view.contentEl as HTMLElement;
 
     const enhancement: LeafEnhancement = {
@@ -256,6 +267,9 @@ export default class GraphProNextPlugin extends Plugin {
             this.scheduleCenterAndOrbit(leaf, this.activeFilePath, showNotice);
           }
         },
+        fitCameraToNodes: (nodes, centerId) => {
+          this.fitCameraToNodes(leaf, nodes, centerId);
+        },
         isAutoFollow: () => this.autoFollow,
         toggleAutoFollow: () => {
           this.autoFollow = !this.autoFollow;
@@ -277,7 +291,8 @@ export default class GraphProNextPlugin extends Plugin {
             if (this.circularLocked && this.activeFilePath) {
               this.executeCenterAndOrbit(leaf, this.activeFilePath, true);
             } else {
-              CircularLayoutEngine.releaseAllLocks(r);
+              const changes = CircularLayoutEngine.releaseAllLocks(r);
+              if (changes.length > 0) this.history.recordChange(changes);
               new Notice("✨ 자유 물리 시뮬레이션 활성화");
             }
           }
@@ -302,10 +317,61 @@ export default class GraphProNextPlugin extends Plugin {
     this.enhancedLeaves.set(leaf, enhancement);
   }
 
-  /**
-   * Executes immediately if the target node is already in renderer.nodeLookup.
-   * Only schedules a single 70ms follow-up if Obsidian is still building the Local Graph nodes.
-   */
+  public fitCameraToNodes(leaf: WorkspaceLeaf, nodes: GraphNode[], centerId?: string | null): void {
+    const view = leaf.view as any;
+    if (!view || !nodes || nodes.length === 0) return;
+    const renderer = view.renderer as GraphRenderer;
+    if (!renderer) return;
+
+    let cx = 0;
+    let cy = 0;
+    const centerNode = centerId
+      ? nodes.find((n) => (n.id || n.path) === centerId)
+      : undefined;
+
+    let minX = Infinity,
+      maxX = -Infinity,
+      minY = Infinity,
+      maxY = -Infinity;
+
+    for (let i = 0; i < nodes.length; i++) {
+      const n = nodes[i];
+      if (n.x < minX) minX = n.x;
+      if (n.x > maxX) maxX = n.x;
+      if (n.y < minY) minY = n.y;
+      if (n.y > maxY) maxY = n.y;
+    }
+
+    if (centerNode) {
+      cx = centerNode.x;
+      cy = centerNode.y;
+    } else {
+      cx = (minX + maxX) / 2;
+      cy = (minY + maxY) / 2;
+    }
+
+    const dpr = window.devicePixelRatio || 1;
+    const width = renderer.width || view.contentEl?.clientWidth || 600;
+    const height = renderer.height || view.contentEl?.clientHeight || 400;
+
+    const spanX = Math.max(maxX - minX, 220);
+    const spanY = Math.max(maxY - minY, 220);
+    const scaleX = (width * dpr * 0.68) / spanX;
+    const scaleY = (height * dpr * 0.68) / spanY;
+    const desiredScale = Math.max(0.35, Math.min(1.4, Math.min(scaleX, scaleY)));
+
+    const targetPanX = (width / 2) * dpr - cx * desiredScale;
+    const targetPanY = (height / 2) * dpr - cy * desiredScale;
+
+    renderer.panvX = 0;
+    renderer.panvY = 0;
+    renderer.targetScale = desiredScale;
+    if (renderer.highlightNode) renderer.highlightNode = null;
+    if (renderer.setScale) renderer.setScale(desiredScale);
+    if (renderer.setPan) renderer.setPan(targetPanX, targetPanY);
+    if (renderer.changed) renderer.changed();
+  }
+
   private scheduleCenterAndOrbit(leaf: WorkspaceLeaf, filePath: string, showNotice: boolean): void {
     const enh = this.enhancedLeaves.get(leaf);
     if (enh) {
@@ -331,7 +397,6 @@ export default class GraphProNextPlugin extends Plugin {
     if (!renderer) return false;
 
     if (vt === "localgraph" && view.engine?.options) {
-      // Prevent 4,000-paper master ledgers from blowing up multi-hop Local Graphs
       const desiredSearch = isSuperHubPath(filePath)
         ? "-file:_Review_Ledger"
         : "-file:_Papers_Dashboard -file:_Review_Ledger -file:_Papers_Graph_Hub";
@@ -359,15 +424,18 @@ export default class GraphProNextPlugin extends Plugin {
     if (!node) return false;
 
     if (vt === "localgraph") {
-      CircularLayoutEngine.arrangeLocalGraphConcentric(
+      const changes = CircularLayoutEngine.arrangeLocalGraphConcentric(
         renderer,
         filePath,
         this.settings.defaultCircleRadius,
         this.circularLocked
       );
-    } else if (vt === "graph" && this.circularLocked && showNotice) {
-      // In Global Graph, only arrange in circle if active note is NOT a 4,000-node master hub
-      if (!isSuperHubPath(filePath)) {
+      if (showNotice && changes.length > 0) {
+        this.history.recordChange(changes);
+      }
+      this.fitCameraToNodes(leaf, renderer.nodes || [node], filePath);
+    } else if (vt === "graph") {
+      if (this.circularLocked && !isSuperHubPath(filePath)) {
         const neighborhood = CircularLayoutEngine.getCleanNeighborhood(renderer, node, filePath, 50);
         if (neighborhood.length > 1 && neighborhood.length <= 51) {
           const res = CircularLayoutEngine.arrangeInCircle(renderer, neighborhood, {
@@ -375,46 +443,17 @@ export default class GraphProNextPlugin extends Plugin {
             baseRadius: this.settings.defaultCircleRadius,
             lockPositions: true,
           });
-          this.history.recordChange(res.changed);
+          if (showNotice && res.changed.length > 0) {
+            this.history.recordChange(res.changed);
+          }
+          this.fitCameraToNodes(leaf, neighborhood, filePath);
+        } else {
+          this.fitCameraToNodes(leaf, [node], filePath);
         }
+      } else {
+        this.fitCameraToNodes(leaf, [node], filePath);
       }
     }
-
-    // Instantaneous 1-frame camera centering (DO NOT set renderer.highlightNode!)
-    const dpr = window.devicePixelRatio || 1;
-    const width = renderer.width || view.contentEl?.clientWidth || 600;
-    const height = renderer.height || view.contentEl?.clientHeight || 400;
-
-    let desiredScale = renderer.scale || 1.1;
-    if (vt === "localgraph") {
-      const allNodes = renderer.nodes || [];
-      let maxDist = 180;
-      for (let i = 0, len = allNodes.length; i < len; i++) {
-        const n = allNodes[i];
-        const dx = n.x - node.x;
-        const dy = n.y - node.y;
-        const dist = Math.sqrt(dx * dx + dy * dy);
-        if (dist > maxDist) maxDist = dist;
-      }
-      const minDim = Math.min(width, height) * dpr;
-      desiredScale = Math.max(0.45, Math.min(1.35, (minDim * 0.38) / Math.max(maxDist, 100)));
-    } else if (showNotice) {
-      desiredScale = Math.max(renderer.scale || 1.0, 1.25);
-    }
-
-    const targetPanX = (width / 2) * dpr - node.x * desiredScale;
-    const targetPanY = (height / 2) * dpr - node.y * desiredScale;
-
-    renderer.panvX = 0;
-    renderer.panvY = 0;
-    renderer.targetScale = desiredScale;
-    // Ensure highlightNode is cleared so Obsidian's WebGL renderer can enter 0% GPU idle sleep
-    if (renderer.highlightNode) {
-      renderer.highlightNode = null;
-    }
-    if (renderer.setScale) renderer.setScale(desiredScale);
-    if (renderer.setPan) renderer.setPan(targetPanX, targetPanY);
-    if (renderer.changed) renderer.changed();
 
     if (showNotice) {
       const shortName = filePath.split("/").pop()?.replace(/\.md$/i, "") || filePath;
@@ -423,6 +462,10 @@ export default class GraphProNextPlugin extends Plugin {
     return true;
   }
 
+  /**
+   * Visually highlights selected nodes on the PixiJS canvas using sprite tinting
+   * without touching `renderer.highlightNode` (preserving 0% GPU idle sleep).
+   */
   private highlightNodes(renderer: GraphRenderer, selected: GraphNode[]): void {
     if (!renderer) return;
     const selectedIds = new Set<string>();
@@ -431,7 +474,19 @@ export default class GraphProNextPlugin extends Plugin {
     }
     const all = renderer.nodes || [];
     for (let i = 0, len = all.length; i < len; i++) {
-      all[i].highlighted = selectedIds.has(all[i].id);
+      const n = all[i];
+      const isSel = selectedIds.has(n.id);
+      if (n.circle) {
+        if (isSel) {
+          if (n._origTint === undefined && n.circle.tint !== undefined) {
+            n._origTint = n.circle.tint;
+          }
+          n.circle.tint = 0x00ffd5; // Bright cyan-emerald highlight
+        } else if (n._origTint !== undefined) {
+          n.circle.tint = n._origTint;
+          n._origTint = undefined;
+        }
+      }
     }
     if (renderer.changed) renderer.changed();
   }
@@ -477,7 +532,8 @@ export default class GraphProNextPlugin extends Plugin {
           if (this.circularLocked && this.activeFilePath) {
             this.executeCenterAndOrbit(active, this.activeFilePath, true);
           } else {
-            CircularLayoutEngine.releaseAllLocks(renderer);
+            const changes = CircularLayoutEngine.releaseAllLocks(renderer);
+            if (changes.length > 0) this.history.recordChange(changes);
           }
         }
       } else if (

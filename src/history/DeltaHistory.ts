@@ -1,5 +1,4 @@
-import { GraphNode, GraphRenderer } from "../types";
-import { NodePositionChange } from "../layout/AlignmentEngine";
+import { GraphNode, GraphRenderer, NodePositionChange } from "../types";
 import { CircularLayoutEngine } from "../layout/CircularLayout";
 
 export class DeltaHistoryManager {
@@ -28,46 +27,64 @@ export class DeltaHistoryManager {
     return this.redoStack.length > 0;
   }
 
+  public getUndoCount(): number {
+    return this.undoStack.length;
+  }
+
   public undo(renderer: GraphRenderer): boolean {
     const action = this.undoStack.pop();
-    if (!action || !renderer || !renderer.nodeLookup) return false;
+    if (!action || !renderer) return false;
 
+    const allNodes = renderer.nodes || [];
     const updatedNodes: GraphNode[] = [];
+
     for (const change of action) {
-      const node = renderer.nodeLookup[change.id];
+      const node = renderer.nodeLookup
+        ? renderer.nodeLookup[change.id]
+        : allNodes.find((n) => (n.id || n.path) === change.id);
       if (node) {
         node.x = change.prevX;
         node.y = change.prevY;
-        if (node.fx != null) node.fx = change.prevX;
-        if (node.fy != null) node.fy = change.prevY;
+        node._pinnedX = change.prevPinnedX;
+        node._pinnedY = change.prevPinnedY;
+        node.fx = change.prevPinnedX !== undefined ? change.prevPinnedX : null;
+        node.fy = change.prevPinnedY !== undefined ? change.prevPinnedY : null;
         updatedNodes.push(node);
       }
     }
 
     this.redoStack.push(action);
-    CircularLayoutEngine.syncNodesToWorker(renderer, updatedNodes, true);
+    const hasLocked = updatedNodes.some((n) => n._pinnedX !== undefined);
+    CircularLayoutEngine.syncNodesToWorker(renderer, updatedNodes, hasLocked);
     if (renderer.changed) renderer.changed();
     return true;
   }
 
   public redo(renderer: GraphRenderer): boolean {
     const action = this.redoStack.pop();
-    if (!action || !renderer || !renderer.nodeLookup) return false;
+    if (!action || !renderer) return false;
 
+    const allNodes = renderer.nodes || [];
     const updatedNodes: GraphNode[] = [];
+
     for (const change of action) {
-      const node = renderer.nodeLookup[change.id];
+      const node = renderer.nodeLookup
+        ? renderer.nodeLookup[change.id]
+        : allNodes.find((n) => (n.id || n.path) === change.id);
       if (node) {
         node.x = change.newX;
         node.y = change.newY;
-        if (node.fx != null) node.fx = change.newX;
-        if (node.fy != null) node.fy = change.newY;
+        node._pinnedX = change.newPinnedX;
+        node._pinnedY = change.newPinnedY;
+        node.fx = change.newPinnedX !== undefined ? change.newPinnedX : null;
+        node.fy = change.newPinnedY !== undefined ? change.newPinnedY : null;
         updatedNodes.push(node);
       }
     }
 
     this.undoStack.push(action);
-    CircularLayoutEngine.syncNodesToWorker(renderer, updatedNodes, true);
+    const hasLocked = updatedNodes.some((n) => n._pinnedX !== undefined);
+    CircularLayoutEngine.syncNodesToWorker(renderer, updatedNodes, hasLocked);
     if (renderer.changed) renderer.changed();
     return true;
   }

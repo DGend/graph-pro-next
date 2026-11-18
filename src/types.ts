@@ -8,7 +8,16 @@ export interface GraphNode {
   fx?: number | null;
   fy?: number | null;
   weight?: number;
-  highlighted?: boolean;
+  forward?: Record<string, any>;
+  reverse?: Record<string, any>;
+  circle?: {
+    tint?: number;
+    alpha?: number;
+    scale?: { x: number; y: number; set?: (x: number, y?: number) => void };
+  };
+  _pinnedX?: number;
+  _pinnedY?: number;
+  _origTint?: number;
 }
 
 export interface GraphLink {
@@ -20,6 +29,16 @@ export interface GraphRenderer {
   nodes?: GraphNode[];
   links?: GraphLink[];
   nodeLookup?: Record<string, GraphNode>;
+  hanger?: {
+    localTransform?: {
+      a: number;
+      b: number;
+      c: number;
+      d: number;
+      tx: number;
+      ty: number;
+    };
+  };
   scale?: number;
   targetScale?: number;
   panX?: number;
@@ -37,22 +56,19 @@ export interface GraphRenderer {
   changed?: () => void;
   start?: () => void;
   stop?: () => void;
+  _graphProHooked?: boolean;
 }
 
-export interface GraphLeafView {
-  getViewType: () => string;
-  contentEl: HTMLElement;
-  file?: { path: string };
-  renderer?: GraphRenderer;
-  engine?: {
-    options?: Record<string, any>;
-    render?: () => void;
-  };
-  dataEngine?: {
-    render?: () => void;
-    currentFocusFile?: string;
-  };
-  onOptionsChange?: () => void;
+export interface NodePositionChange {
+  id: string;
+  prevX: number;
+  prevY: number;
+  prevPinnedX?: number;
+  prevPinnedY?: number;
+  newX: number;
+  newY: number;
+  newPinnedX?: number;
+  newPinnedY?: number;
 }
 
 export interface PluginSettings {

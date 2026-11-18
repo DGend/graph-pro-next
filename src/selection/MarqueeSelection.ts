@@ -19,7 +19,6 @@ export class MarqueeSelectionManager {
   private containerRect: DOMRect | null = null;
   private rafId: number | null = null;
 
-  // Flat contiguous Float32Array spatial cache built once per drag start
   private cachedCoords: Float32Array = new Float32Array(0);
   private cachedNodes: GraphNode[] = [];
   private selectedIndices = new Set<number>();
@@ -29,26 +28,29 @@ export class MarqueeSelectionManager {
     this.containerEl = containerEl;
     this.renderer = renderer;
     this.callback = callback;
-    this.containerEl.addEventListener("mousedown", this.onMouseDown, true);
+    // Intercept pointerdown in capture phase BEFORE PixiJS starts panning the canvas
+    this.containerEl.addEventListener("pointerdown", this.onPointerDown, true);
   }
 
   public destroy(): void {
-    this.containerEl.removeEventListener("mousedown", this.onMouseDown, true);
+    this.containerEl.removeEventListener("pointerdown", this.onPointerDown, true);
     this.detachDragListeners();
     this.removeBox();
   }
 
   private detachDragListeners(): void {
-    window.removeEventListener("mousemove", this.onMouseMove, true);
-    window.removeEventListener("mouseup", this.onMouseUp, true);
+    window.removeEventListener("pointermove", this.onPointerMove, true);
+    window.removeEventListener("pointerup", this.onPointerUp, true);
     if (this.rafId !== null) {
       cancelAnimationFrame(this.rafId);
       this.rafId = null;
     }
   }
 
-  private onMouseDown = (evt: MouseEvent): void => {
+  private onPointerDown = (evt: PointerEvent): void => {
     if (!evt.shiftKey || evt.button !== 0) return;
+    // Ignore clicks on our own toolbar buttons
+    if ((evt.target as HTMLElement)?.closest?.(".graph-pro-next-toolbar")) return;
 
     this.containerRect = this.containerEl.getBoundingClientRect();
     this.startX = evt.clientX - this.containerRect.left;
@@ -59,7 +61,6 @@ export class MarqueeSelectionManager {
     this.isDeselectMode = evt.altKey;
     this.lastSelectionHash = -1;
 
-    // Build flat Float32Array spatial cache ONCE at drag start
     const nodes = this.renderer.nodes || [];
     const len = nodes.length;
     this.cachedNodes = nodes;
@@ -77,16 +78,19 @@ export class MarqueeSelectionManager {
 
     evt.preventDefault();
     evt.stopPropagation();
+    evt.stopImmediatePropagation();
 
     this.createOrUpdateBox();
 
-    // Only attach global move/up listeners while actively dragging
-    window.addEventListener("mousemove", this.onMouseMove, true);
-    window.addEventListener("mouseup", this.onMouseUp, true);
+    window.addEventListener("pointermove", this.onPointerMove, true);
+    window.addEventListener("pointerup", this.onPointerUp, true);
   };
 
-  private onMouseMove = (evt: MouseEvent): void => {
+  private onPointerMove = (evt: PointerEvent): void => {
     if (!this.isSelecting || !this.containerRect) return;
+
+    evt.preventDefault();
+    evt.stopPropagation();
 
     this.currentX = Math.max(0, Math.min(this.containerRect.width, evt.clientX - this.containerRect.left));
     this.currentY = Math.max(0, Math.min(this.containerRect.height, evt.clientY - this.containerRect.top));
@@ -103,8 +107,11 @@ export class MarqueeSelectionManager {
     }
   };
 
-  private onMouseUp = (_evt: MouseEvent): void => {
+  private onPointerUp = (evt: PointerEvent): void => {
     if (!this.isSelecting) return;
+    evt.preventDefault();
+    evt.stopPropagation();
+
     this.isSelecting = false;
     this.detachDragListeners();
     this.removeBox();
@@ -177,7 +184,7 @@ export class MarqueeSelectionManager {
     }
 
     if (!isFinal && hash === this.lastSelectionHash) {
-      return; // Skip redundant re-renders when enclosed node set hasn't changed
+      return;
     }
     this.lastSelectionHash = hash;
 

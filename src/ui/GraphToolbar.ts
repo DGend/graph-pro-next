@@ -13,6 +13,7 @@ export interface ToolbarCallbacks {
   getRenderer: () => GraphRenderer | undefined;
   getActiveFilePath: () => string | null;
   centerAndOrbitOnActive: (showNotice: boolean) => void;
+  fitCameraToNodes: (nodes: GraphNode[], centerId?: string | null) => void;
   isAutoFollow: () => boolean;
   toggleAutoFollow: () => void;
   isCircularLocked: () => boolean;
@@ -95,57 +96,120 @@ export class GraphToolbarManager {
       this.callbacks.isAutoFollow()
     );
 
-    this.addButton("⭕ 선택원형", "Shift+드래그로 선택한 노드들을 원형 배치", () => {
+    this.addButton("⭕ 선택원형", "선택한 노드(미선택 시 현재 페이지 주변 노드)를 원형으로 정렬", () => {
       const renderer = this.callbacks.getRenderer();
       if (!renderer) return;
       const selected = this.callbacks.getSelectedNodes();
+      const activeFile = this.callbacks.getActiveFilePath();
       if (selected.length > 1) {
-        const activeFile = this.callbacks.getActiveFilePath();
         const res = CircularLayoutEngine.arrangeInCircle(renderer, selected, {
           centerNodeId: activeFile || undefined,
           baseRadius: 180,
           lockPositions: true,
         });
         this.history.recordChange(res.changed);
-        new Notice(`🎯 선택된 ${selected.length}개 노드 원형 정렬 완료`);
+        this.callbacks.fitCameraToNodes(selected, activeFile);
+        new Notice(`⭕ 선택된 ${selected.length}개 노드 원형 정렬 완료`);
       } else {
         this.callbacks.centerAndOrbitOnActive(true);
       }
     });
 
-    this.addButton("↔️ 수평", "선택 노드 수평 일직선 정렬", () => {
+    this.addButton("↔️ 수평", "선택 노드(미선택 시 현재 페이지와 연결 노드)를 수평 일직선 행(Row)으로 정렬", () => {
       const renderer = this.callbacks.getRenderer();
-      const selected = this.callbacks.getSelectedNodes();
-      if (!renderer || selected.length <= 1) return;
-      this.history.recordChange(AlignmentEngine.alignHorizontal(renderer, selected));
+      if (!renderer) return;
+      const activeFile = this.callbacks.getActiveFilePath();
+      const targets = CircularLayoutEngine.resolveTargetNodes(
+        renderer,
+        this.callbacks.getSelectedNodes(),
+        activeFile,
+        this.callbacks.getViewType()
+      );
+      if (targets.length <= 1) {
+        new Notice("정렬할 연결 노드가 없습니다.");
+        return;
+      }
+      const changes = AlignmentEngine.alignHorizontal(renderer, targets, activeFile);
+      this.history.recordChange(changes);
+      this.callbacks.fitCameraToNodes(targets, activeFile);
+      new Notice(`↔️ ${targets.length}개 노드 수평 정렬 완료`);
     });
 
-    this.addButton("↕️ 수직", "선택 노드 수직 일직선 정렬", () => {
+    this.addButton("↕️ 수직", "선택 노드(미선택 시 현재 페이지와 연결 노드)를 수직 일직선 열(Column)로 정렬", () => {
       const renderer = this.callbacks.getRenderer();
-      const selected = this.callbacks.getSelectedNodes();
-      if (!renderer || selected.length <= 1) return;
-      this.history.recordChange(AlignmentEngine.alignVertical(renderer, selected));
+      if (!renderer) return;
+      const activeFile = this.callbacks.getActiveFilePath();
+      const targets = CircularLayoutEngine.resolveTargetNodes(
+        renderer,
+        this.callbacks.getSelectedNodes(),
+        activeFile,
+        this.callbacks.getViewType()
+      );
+      if (targets.length <= 1) {
+        new Notice("정렬할 연결 노드가 없습니다.");
+        return;
+      }
+      const changes = AlignmentEngine.alignVertical(renderer, targets, activeFile);
+      this.history.recordChange(changes);
+      this.callbacks.fitCameraToNodes(targets, activeFile);
+      new Notice(`↕️ ${targets.length}개 노드 수직 정렬 완료`);
     });
 
-    this.addButton("🔲 그리드", "선택 노드 50px 격자 스냅", () => {
+    this.addButton("🔲 그리드", "선택 노드(미선택 시 현재 페이지와 연결 노드)를 바둑판 격자 행렬로 정렬", () => {
       const renderer = this.callbacks.getRenderer();
-      const selected = this.callbacks.getSelectedNodes();
-      if (!renderer || selected.length === 0) return;
-      this.history.recordChange(AlignmentEngine.snapToGrid(renderer, selected, 50));
+      if (!renderer) return;
+      const activeFile = this.callbacks.getActiveFilePath();
+      const targets = CircularLayoutEngine.resolveTargetNodes(
+        renderer,
+        this.callbacks.getSelectedNodes(),
+        activeFile,
+        this.callbacks.getViewType()
+      );
+      if (targets.length === 0) return;
+      const changes = AlignmentEngine.snapToGrid(renderer, targets, activeFile);
+      this.history.recordChange(changes);
+      this.callbacks.fitCameraToNodes(targets, activeFile);
+      const cols = Math.max(2, Math.ceil(Math.sqrt(targets.length)));
+      const rows = Math.ceil(targets.length / cols);
+      new Notice(`🔲 ${targets.length}개 노드 바둑판 그리드(${cols}×${rows}) 정렬 완료`);
     });
 
-    this.addButton("⬅️ 역링크", "선택 노드의 역링크(Backlinks) 확장 선택", () => {
+    this.addButton("⬅️ 역링크", "현재 페이지(또는 선택 노드)를 인용하는 역링크 노드를 선택하고 좌측 반원 호로 배치", () => {
       const renderer = this.callbacks.getRenderer();
-      const selected = this.callbacks.getSelectedNodes();
-      if (!renderer || selected.length === 0) return;
-      this.callbacks.setSelectedNodes(LinkExpansionEngine.selectBacklinks(renderer, selected));
+      if (!renderer) return;
+      const activeFile = this.callbacks.getActiveFilePath();
+      const res = LinkExpansionEngine.selectAndArrangeBacklinks(
+        renderer,
+        this.callbacks.getSelectedNodes(),
+        activeFile
+      );
+      if (res.nodes.length <= 1) {
+        new Notice("⬅️ 연결된 역링크(Backlinks) 노드가 없습니다.");
+        return;
+      }
+      this.history.recordChange(res.changes);
+      this.callbacks.setSelectedNodes(res.nodes);
+      this.callbacks.fitCameraToNodes(res.nodes, activeFile);
+      new Notice(`⬅️ 역링크 ${res.nodes.length - 1}개 선택 및 좌측 호 정렬 완료`);
     });
 
-    this.addButton("➡️ 후속", "선택 노드의 후속 링크(Outgoing) 확장 선택", () => {
+    this.addButton("➡️ 후속", "현재 페이지(또는 선택 노드)가 인용하는 후속 링크 노드를 선택하고 우측 반원 호로 배치", () => {
       const renderer = this.callbacks.getRenderer();
-      const selected = this.callbacks.getSelectedNodes();
-      if (!renderer || selected.length === 0) return;
-      this.callbacks.setSelectedNodes(LinkExpansionEngine.selectOutgoingLinks(renderer, selected));
+      if (!renderer) return;
+      const activeFile = this.callbacks.getActiveFilePath();
+      const res = LinkExpansionEngine.selectAndArrangeOutgoingLinks(
+        renderer,
+        this.callbacks.getSelectedNodes(),
+        activeFile
+      );
+      if (res.nodes.length <= 1) {
+        new Notice("➡️ 연결된 후속 링크(Outgoing) 노드가 없습니다.");
+        return;
+      }
+      this.history.recordChange(res.changes);
+      this.callbacks.setSelectedNodes(res.nodes);
+      this.callbacks.fitCameraToNodes(res.nodes, activeFile);
+      new Notice(`➡️ 후속링크 ${res.nodes.length - 1}개 선택 및 우측 호 정렬 완료`);
     });
 
     if (this.callbacks.getViewType() === "localgraph") {
@@ -167,11 +231,24 @@ export class GraphToolbarManager {
 
     this.addButton("↩️ 취소", "이전 노드 배치로 되돌리기 (Ctrl+Z)", () => {
       const renderer = this.callbacks.getRenderer();
-      if (renderer) this.history.undo(renderer);
+      if (!renderer) return;
+      if (this.history.undo(renderer)) {
+        new Notice(`↩️ 이전 배치로 복원 완료 (남은 단계: ${this.history.getUndoCount()})`);
+      } else {
+        new Notice("되돌릴 이전 배치 기록이 없습니다.");
+      }
     });
 
-    this.addButton("✕ 해제", "선택 해제", () => {
+    this.addButton("✕ 해제", "선택 초기화 및 모든 노드 위치 고정 해제 (자유 물리 복원)", () => {
+      const renderer = this.callbacks.getRenderer();
       this.callbacks.clearSelection();
+      if (renderer) {
+        const changes = CircularLayoutEngine.releaseAllLocks(renderer);
+        if (changes.length > 0) {
+          this.history.recordChange(changes);
+        }
+      }
+      new Notice("🔓 선택 해제 및 자유 물리 모드로 복원되었습니다.");
     });
 
     this.containerEl.appendChild(this.toolbarEl);
