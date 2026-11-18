@@ -1,5 +1,5 @@
 import { Notice, Plugin, WorkspaceLeaf } from "obsidian";
-import { DEFAULT_SETTINGS, PluginSettings, GraphNode, GraphRenderer } from "./types";
+import { DEFAULT_SETTINGS, PluginSettings, GraphNode, GraphRenderer, HopDistanceConfig } from "./types";
 import { GraphProSettingsTab } from "./settings/SettingsTab";
 import { MarqueeSelectionManager } from "./selection/MarqueeSelection";
 import { GraphToolbarManager } from "./ui/GraphToolbar";
@@ -92,7 +92,7 @@ export default class GraphProNextPlugin extends Plugin {
         if (enh && renderer && enh.selectedNodes.length > 1) {
           const res = CircularLayoutEngine.arrangeInCircle(renderer, enh.selectedNodes, {
             centerNodeId: this.activeFilePath || undefined,
-            baseRadius: this.settings.defaultCircleRadius,
+            baseRadius: this.settings.hop1Radius,
             lockPositions: true,
           });
           this.history.recordChange(res.changed);
@@ -154,6 +154,45 @@ export default class GraphProNextPlugin extends Plugin {
       enh.marquee.destroy();
     }
     this.enhancedLeaves.clear();
+  }
+
+  public getHopDistanceConfig(): HopDistanceConfig {
+    return {
+      hop1Radius: this.settings.hop1Radius,
+      hop2Gap: this.settings.hop2Gap,
+      hop3Gap: this.settings.hop3Gap,
+      nodeArcSpacing: this.settings.nodeArcSpacing,
+    };
+  }
+
+  public updateHopDistanceConfig(partial: Partial<HopDistanceConfig>): void {
+    if (partial.hop1Radius !== undefined) {
+      this.settings.hop1Radius = partial.hop1Radius;
+      this.settings.defaultCircleRadius = partial.hop1Radius;
+    }
+    if (partial.hop2Gap !== undefined) {
+      this.settings.hop2Gap = partial.hop2Gap;
+    }
+    if (partial.hop3Gap !== undefined) {
+      this.settings.hop3Gap = partial.hop3Gap;
+    }
+    if (partial.nodeArcSpacing !== undefined) {
+      this.settings.nodeArcSpacing = partial.nodeArcSpacing;
+    }
+    this.saveSettings();
+    this.refreshAllToolbars();
+  }
+
+  public reapplyActiveLayout(keepCameraZoom = true): void {
+    this.detectActiveFile();
+    if (!this.activeFilePath) return;
+    const leaves = [
+      ...this.app.workspace.getLeavesOfType("graph"),
+      ...this.app.workspace.getLeavesOfType("localgraph"),
+    ];
+    for (const leaf of leaves) {
+      this.executeCenterAndOrbit(leaf, this.activeFilePath, false, keepCameraZoom);
+    }
   }
 
   private detectActiveFile(): void {
@@ -264,7 +303,7 @@ export default class GraphProNextPlugin extends Plugin {
 
     CircularLayoutEngine.ensureRendererPinHook(renderer, () => {
       if (this.autoFollow && this.activeFilePath) {
-        this.executeCenterAndOrbit(leaf, this.activeFilePath, false);
+        this.executeCenterAndOrbit(leaf, this.activeFilePath, false, false);
       }
     });
 
@@ -312,14 +351,18 @@ export default class GraphProNextPlugin extends Plugin {
           return this.activeFilePath;
         },
         getResolvedLinks: () => (this.app.metadataCache as any)?.resolvedLinks,
-        centerAndOrbitOnActive: (showNotice) => {
+        centerAndOrbitOnActive: (showNotice, keepCameraZoom = false) => {
           this.detectActiveFile();
           if (this.activeFilePath) {
-            this.scheduleCenterAndOrbit(leaf, this.activeFilePath, showNotice, false);
+            if (keepCameraZoom) {
+              this.executeCenterAndOrbit(leaf, this.activeFilePath, showNotice, true);
+            } else {
+              this.scheduleCenterAndOrbit(leaf, this.activeFilePath, showNotice, false);
+            }
           }
         },
         fitCameraToNodes: (nodes, centerId) => {
-          this.fitCameraToNodes(leaf, nodes, centerId);
+          this.fitCameraToNodes(leaf, nodes, centerId, false);
         },
         isAutoFollow: () => this.autoFollow,
         toggleAutoFollow: () => {
@@ -340,7 +383,7 @@ export default class GraphProNextPlugin extends Plugin {
           const r = this.getRenderer(leaf);
           if (r) {
             if (this.circularLocked && this.activeFilePath) {
-              this.executeCenterAndOrbit(leaf, this.activeFilePath, true);
+              this.executeCenterAndOrbit(leaf, this.activeFilePath, true, false);
             } else {
               const changes = CircularLayoutEngine.releaseAllLocks(r);
               if (changes.length > 0) this.history.recordChange(changes);
@@ -354,6 +397,8 @@ export default class GraphProNextPlugin extends Plugin {
         getHopDepth: () => {
           return this.hopDepth;
         },
+        getHopDistanceConfig: () => this.getHopDistanceConfig(),
+        updateHopDistanceConfig: (partial) => this.updateHopDistanceConfig(partial),
       },
       this.history
     );
@@ -361,7 +406,12 @@ export default class GraphProNextPlugin extends Plugin {
     this.enhancedLeaves.set(leaf, enhancement);
   }
 
-  public fitCameraToNodes(leaf: WorkspaceLeaf, nodes: GraphNode[], centerId?: string | null): void {
+  public fitCameraToNodes(
+    leaf: WorkspaceLeaf,
+    nodes: GraphNode[],
+    centerId?: string | null,
+    keepCurrentZoom = false
+  ): void {
     const view = leaf.view as any;
     if (!view || !nodes || nodes.length === 0) return;
     const renderer = view.renderer as GraphRenderer;
@@ -401,11 +451,14 @@ export default class GraphProNextPlugin extends Plugin {
     const width = renderer.width || view.contentEl?.clientWidth || 600;
     const height = renderer.height || view.contentEl?.clientHeight || 400;
 
-    const spanX = Math.max(maxX - minX, 240);
-    const spanY = Math.max(maxY - minY, 240);
-    const scaleX = (width * dpr * 0.68) / spanX;
-    const scaleY = (height * dpr * 0.68) / spanY;
-    const desiredScale = Math.max(0.32, Math.min(1.38, Math.min(scaleX, scaleY)));
+    let desiredScale = renderer.scale || 0.85;
+    if (!keepCurrentZoom) {
+      const spanX = Math.max(maxX - minX, 240);
+      const spanY = Math.max(maxY - minY, 240);
+      const scaleX = (width * dpr * 0.68) / spanX;
+      const scaleY = (height * dpr * 0.68) / spanY;
+      desiredScale = Math.max(0.25, Math.min(1.38, Math.min(scaleX, scaleY)));
+    }
 
     const targetPanX = (width / 2) * dpr - cx * desiredScale;
     const targetPanY = (height / 2) * dpr - cy * desiredScale;
@@ -431,23 +484,28 @@ export default class GraphProNextPlugin extends Plugin {
       enh.timers = [];
     }
 
-    const doneNow = this.executeCenterAndOrbit(leaf, filePath, showNotice);
+    const doneNow = this.executeCenterAndOrbit(leaf, filePath, showNotice, false);
 
     if (enh && (!doneNow || expectAsyncEngineUpdate)) {
       const t1 = window.setTimeout(() => {
-        this.executeCenterAndOrbit(leaf, filePath, !doneNow && showNotice);
+        this.executeCenterAndOrbit(leaf, filePath, !doneNow && showNotice, false);
       }, 65);
       const t2 = window.setTimeout(() => {
-        this.executeCenterAndOrbit(leaf, filePath, false);
+        this.executeCenterAndOrbit(leaf, filePath, false, false);
       }, 180);
       const t3 = window.setTimeout(() => {
-        this.executeCenterAndOrbit(leaf, filePath, false);
+        this.executeCenterAndOrbit(leaf, filePath, false, false);
       }, 360);
       enh.timers.push(t1, t2, t3);
     }
   }
 
-  private executeCenterAndOrbit(leaf: WorkspaceLeaf, filePath: string, showNotice: boolean): boolean {
+  private executeCenterAndOrbit(
+    leaf: WorkspaceLeaf,
+    filePath: string,
+    showNotice: boolean,
+    keepCameraZoom = false
+  ): boolean {
     const view = leaf.view as any;
     if (!view) return false;
     const vt = view.getViewType();
@@ -455,8 +513,6 @@ export default class GraphProNextPlugin extends Plugin {
     if (!renderer) return false;
 
     if (vt === "localgraph" && view.engine?.options) {
-      // Only exclude the 7,390-line raw state ledger (`_Review_Ledger`).
-      // NEVER exclude `_Topics_Hub` or `_Papers_Dashboard` so backlinks to hubs are ALWAYS visible!
       const desiredSearch = isMassLedgerPath(filePath)
         ? ""
         : "-file:_Review_Ledger -file:_All_Papers_Grand_Master_Dashboard";
@@ -518,7 +574,7 @@ export default class GraphProNextPlugin extends Plugin {
       renderer,
       filePath,
       effectiveHop,
-      this.settings.defaultCircleRadius,
+      this.getHopDistanceConfig(),
       this.circularLocked,
       vt,
       (this.app.metadataCache as any)?.resolvedLinks,
@@ -529,7 +585,12 @@ export default class GraphProNextPlugin extends Plugin {
       this.history.recordChange(res.changes);
     }
 
-    this.fitCameraToNodes(leaf, res.visibleNodes.length > 0 ? res.visibleNodes : [node], filePath);
+    this.fitCameraToNodes(
+      leaf,
+      res.visibleNodes.length > 0 ? res.visibleNodes : [node],
+      filePath,
+      keepCameraZoom
+    );
 
     if (showNotice) {
       const shortName = filePath.split("/").pop()?.replace(/\.md$/i, "") || filePath;
@@ -603,7 +664,7 @@ export default class GraphProNextPlugin extends Plugin {
           this.circularLocked = !this.circularLocked;
           enh.toolbar.refreshState();
           if (this.circularLocked && this.activeFilePath) {
-            this.executeCenterAndOrbit(active, this.activeFilePath, true);
+            this.executeCenterAndOrbit(active, this.activeFilePath, true, false);
           } else {
             const changes = CircularLayoutEngine.releaseAllLocks(renderer);
             if (changes.length > 0) this.history.recordChange(changes);
@@ -614,6 +675,26 @@ export default class GraphProNextPlugin extends Plugin {
         evt.stopPropagation();
         const depth = parseInt(evt.code.replace("Digit", ""), 10);
         this.applyHopDepthToLeaf(active, depth);
+      } else if (evt.code === "BracketLeft") {
+        evt.preventDefault();
+        evt.stopPropagation();
+        const cfg = this.getHopDistanceConfig();
+        this.updateHopDistanceConfig({
+          hop1Radius: Math.max(40, cfg.hop1Radius - 25),
+          hop2Gap: Math.max(40, cfg.hop2Gap - 25),
+          hop3Gap: Math.max(40, cfg.hop3Gap - 25),
+        });
+        this.reapplyActiveLayout(true);
+      } else if (evt.code === "BracketRight") {
+        evt.preventDefault();
+        evt.stopPropagation();
+        const cfg = this.getHopDistanceConfig();
+        this.updateHopDistanceConfig({
+          hop1Radius: Math.min(800, cfg.hop1Radius + 25),
+          hop2Gap: Math.min(800, cfg.hop2Gap + 25),
+          hop3Gap: Math.min(800, cfg.hop3Gap + 25),
+        });
+        this.reapplyActiveLayout(true);
       }
       return;
     }

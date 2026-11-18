@@ -1,5 +1,5 @@
 import { Notice } from "obsidian";
-import { GraphNode, GraphRenderer } from "../types";
+import { GraphNode, GraphRenderer, HopDistanceConfig } from "../types";
 import { CircularLayoutEngine } from "../layout/CircularLayout";
 import { AlignmentEngine } from "../layout/AlignmentEngine";
 import { LinkExpansionEngine } from "../selection/LinkExpansion";
@@ -13,7 +13,7 @@ export interface ToolbarCallbacks {
   getRenderer: () => GraphRenderer | undefined;
   getActiveFilePath: () => string | null;
   getResolvedLinks: () => Record<string, Record<string, number>> | undefined;
-  centerAndOrbitOnActive: (showNotice: boolean) => void;
+  centerAndOrbitOnActive: (showNotice: boolean, keepCameraZoom?: boolean) => void;
   fitCameraToNodes: (nodes: GraphNode[], centerId?: string | null) => void;
   isAutoFollow: () => boolean;
   toggleAutoFollow: () => void;
@@ -21,6 +21,8 @@ export interface ToolbarCallbacks {
   toggleCircularLocked: () => void;
   setHopDepth: (depth: number) => void;
   getHopDepth: () => number;
+  getHopDistanceConfig: () => HopDistanceConfig;
+  updateHopDistanceConfig: (partial: Partial<HopDistanceConfig>) => void;
 }
 
 export class GraphToolbarManager {
@@ -28,11 +30,14 @@ export class GraphToolbarManager {
   private callbacks: ToolbarCallbacks;
   private history: DeltaHistoryManager;
   private toolbarEl: HTMLElement | null = null;
+  private popoverEl: HTMLElement | null = null;
   private titleBadgeEl: HTMLElement | null = null;
   private statsBadgeEl: HTMLElement | null = null;
   private followBtnEl: HTMLButtonElement | null = null;
   private orbitBtnEl: HTMLButtonElement | null = null;
+  private distBtnEl: HTMLButtonElement | null = null;
   private depthBtns: HTMLButtonElement[] = [];
+  private sliderInputs: Record<string, { input: HTMLInputElement; valEl: HTMLElement }> = {};
 
   constructor(containerEl: HTMLElement, callbacks: ToolbarCallbacks, history: DeltaHistoryManager) {
     this.containerEl = containerEl;
@@ -52,6 +57,8 @@ export class GraphToolbarManager {
 
     const existing = this.containerEl.querySelector(".graph-pro-next-toolbar");
     if (existing) existing.remove();
+    const existingPop = this.containerEl.querySelector(".graph-pro-distance-popover");
+    if (existingPop) existingPop.remove();
     const legacyHud = this.containerEl.querySelector(".agy-graph-hud");
     if (legacyHud) legacyHud.remove();
 
@@ -72,7 +79,7 @@ export class GraphToolbarManager {
       "🎯 중심·원형 (F)",
       "현재 페이지를 정중앙에 고정하고 설정된 홉(1~3홉) 범위만 동심원으로 즉시 배치 (단축키: F / Space)",
       () => {
-        this.callbacks.centerAndOrbitOnActive(true);
+        this.callbacks.centerAndOrbitOnActive(true, false);
       },
       true
     );
@@ -100,6 +107,38 @@ export class GraphToolbarManager {
       b.dataset.depth = String(opt.depth);
       this.depthBtns.push(b);
     }
+
+    // Quick Hop Distance Stepper & Live Sliders Popover Button
+    this.addButton("➖", "1·2·3홉 원형 반경 간격 축소 (-25px, 단축키: [ )", () => {
+      const cfg = this.callbacks.getHopDistanceConfig();
+      this.callbacks.updateHopDistanceConfig({
+        hop1Radius: Math.max(40, cfg.hop1Radius - 25),
+        hop2Gap: Math.max(40, cfg.hop2Gap - 25),
+        hop3Gap: Math.max(40, cfg.hop3Gap - 25),
+      });
+      this.syncSlidersFromConfig();
+      this.callbacks.centerAndOrbitOnActive(false, true);
+    });
+
+    this.distBtnEl = this.addButton(
+      "📏 거리조절",
+      "1홉 반경, 2홉 간격, 3홉 간격, 자동확장 비율을 슬라이더로 정밀 조절",
+      () => {
+        this.toggleDistancePopover();
+      },
+      false
+    );
+
+    this.addButton("➕", "1·2·3홉 원형 반경 간격 확대 (+25px, 단축키: ] )", () => {
+      const cfg = this.callbacks.getHopDistanceConfig();
+      this.callbacks.updateHopDistanceConfig({
+        hop1Radius: Math.min(800, cfg.hop1Radius + 25),
+        hop2Gap: Math.min(800, cfg.hop2Gap + 25),
+        hop3Gap: Math.min(800, cfg.hop3Gap + 25),
+      });
+      this.syncSlidersFromConfig();
+      this.callbacks.centerAndOrbitOnActive(false, true);
+    });
 
     this.orbitBtnEl = this.addButton(
       this.callbacks.isCircularLocked() ? "⭕ 원형고정: ON" : "✨ 자유물리: ON",
@@ -245,6 +284,111 @@ export class GraphToolbarManager {
     this.containerEl.appendChild(this.toolbarEl);
   }
 
+  private toggleDistancePopover(): void {
+    if (this.popoverEl) {
+      this.popoverEl.remove();
+      this.popoverEl = null;
+      this.distBtnEl?.classList.remove("is-active");
+      return;
+    }
+
+    this.distBtnEl?.classList.add("is-active");
+    const pop = document.createElement("div");
+    pop.className = "graph-pro-distance-popover";
+    pop.addEventListener("pointerdown", (e) => e.stopPropagation());
+    pop.addEventListener("mousedown", (e) => e.stopPropagation());
+
+    const header = document.createElement("div");
+    header.className = "graph-pro-popover-header";
+    const hTitle = document.createElement("span");
+    hTitle.textContent = "📏 1·2·3홉 동심원 반경 및 거리 조절";
+    header.appendChild(hTitle);
+
+    const resetBtn = document.createElement("button");
+    resetBtn.className = "graph-pro-btn";
+    resetBtn.textContent = "🔄 기본값";
+    resetBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.callbacks.updateHopDistanceConfig({
+        hop1Radius: 160,
+        hop2Gap: 160,
+        hop3Gap: 160,
+        nodeArcSpacing: 18,
+      });
+      this.syncSlidersFromConfig();
+      this.callbacks.centerAndOrbitOnActive(false, true);
+    });
+    header.appendChild(resetBtn);
+    pop.appendChild(header);
+
+    const cfg = this.callbacks.getHopDistanceConfig();
+    this.sliderInputs = {};
+
+    this.addSliderRow(pop, "hop1Radius", "1홉 반경 (중심 ↔ 1홉)", 40, 700, 10, cfg.hop1Radius, "px");
+    this.addSliderRow(pop, "hop2Gap", "2홉 간격 (1홉 ↔ 2홉)", 40, 700, 10, cfg.hop2Gap, "px");
+    this.addSliderRow(pop, "hop3Gap", "3홉 간격 (2홉 ↔ 3홉)", 40, 700, 10, cfg.hop3Gap, "px");
+    this.addSliderRow(pop, "nodeArcSpacing", "노드 수 비례 자동확장 (0=고정)", 0, 80, 2, cfg.nodeArcSpacing, "px");
+
+    this.popoverEl = pop;
+    this.containerEl.appendChild(pop);
+  }
+
+  private addSliderRow(
+    parent: HTMLElement,
+    key: keyof HopDistanceConfig,
+    label: string,
+    min: number,
+    max: number,
+    step: number,
+    initialVal: number,
+    unit: string
+  ): void {
+    const row = document.createElement("div");
+    row.className = "graph-pro-slider-row";
+
+    const lbl = document.createElement("span");
+    lbl.className = "graph-pro-slider-label";
+    lbl.textContent = label;
+    row.appendChild(lbl);
+
+    const input = document.createElement("input");
+    input.type = "range";
+    input.className = "graph-pro-slider-input";
+    input.min = String(min);
+    input.max = String(max);
+    input.step = String(step);
+    input.value = String(initialVal);
+
+    const valEl = document.createElement("span");
+    valEl.className = "graph-pro-slider-val";
+    valEl.textContent = `${initialVal}${unit}`;
+
+    input.addEventListener("input", (e) => {
+      e.stopPropagation();
+      const num = Number(input.value);
+      valEl.textContent = `${num}${unit}`;
+      this.callbacks.updateHopDistanceConfig({ [key]: num });
+      this.callbacks.centerAndOrbitOnActive(false, true);
+    });
+
+    row.appendChild(input);
+    row.appendChild(valEl);
+    parent.appendChild(row);
+
+    this.sliderInputs[key] = { input, valEl };
+  }
+
+  public syncSlidersFromConfig(): void {
+    const cfg = this.callbacks.getHopDistanceConfig();
+    for (const k of ["hop1Radius", "hop2Gap", "hop3Gap", "nodeArcSpacing"] as Array<keyof HopDistanceConfig>) {
+      const item = this.sliderInputs[k];
+      if (item) {
+        item.input.value = String(cfg[k]);
+        item.valEl.textContent = `${cfg[k]}px`;
+      }
+    }
+  }
+
   private addButton(text: string, title: string, onClick: () => void, isActive = false): HTMLButtonElement {
     const btn = document.createElement("button");
     btn.className = "graph-pro-btn" + (isActive ? " is-active" : "");
@@ -287,9 +431,14 @@ export class GraphToolbarManager {
         b.classList.toggle("is-active", Number(b.dataset.depth) === cur);
       }
     }
+    this.syncSlidersFromConfig();
   }
 
   public destroy(): void {
+    if (this.popoverEl) {
+      this.popoverEl.remove();
+      this.popoverEl = null;
+    }
     if (this.toolbarEl) {
       this.toolbarEl.remove();
       this.toolbarEl = null;

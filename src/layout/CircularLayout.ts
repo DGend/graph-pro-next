@@ -1,4 +1,4 @@
-import { GraphNode, GraphRenderer, NodePositionChange } from "../types";
+import { GraphNode, GraphRenderer, HopDistanceConfig, NodePositionChange } from "../types";
 
 export interface CircleLayoutOptions {
   centerNodeId?: string;
@@ -386,7 +386,7 @@ export class CircularLayoutEngine {
     renderer: GraphRenderer,
     centerFilePath: string,
     maxHop: number,
-    baseRadius = 175,
+    distConfig: number | HopDistanceConfig = 160,
     lockPositions = true,
     viewType = "localgraph",
     resolvedLinks?: Record<string, Record<string, number>>,
@@ -609,9 +609,17 @@ export class CircularLayoutEngine {
     const angleByNodeId = new Map<string, number>();
     const startAngle = -Math.PI / 2;
 
+    const cfg: HopDistanceConfig =
+      typeof distConfig === "number"
+        ? { hop1Radius: distConfig, hop2Gap: distConfig, hop3Gap: distConfig, nodeArcSpacing: 18 }
+        : distConfig;
+
     const ring1 = hopRings[1];
     const n1 = ring1.length;
-    const r1 = Math.max(baseRadius, Math.round((Math.max(n1, 1) * 58) / (2 * Math.PI)));
+    const r1 = Math.max(
+      cfg.hop1Radius,
+      Math.round((Math.max(n1, 1) * cfg.nodeArcSpacing) / (2 * Math.PI))
+    );
 
     if (n1 > 0) {
       const step1 = (2 * Math.PI) / n1;
@@ -629,7 +637,7 @@ export class CircularLayoutEngine {
 
     const ring2 = hopRings[2];
     const n2 = ring2.length;
-    const r2 = r1 + 170;
+    const r2 = r1 + cfg.hop2Gap;
 
     if (n2 > 0 && maxHop >= 2) {
       ring2.sort((a, b) => {
@@ -658,7 +666,7 @@ export class CircularLayoutEngine {
 
     const ring3 = hopRings[3];
     const n3 = ring3.length;
-    const r3 = r2 + 170;
+    const r3 = r2 + cfg.hop3Gap;
 
     if (n3 > 0 && maxHop >= 3) {
       ring3.sort((a, b) => {

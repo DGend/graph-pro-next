@@ -93,8 +93,19 @@ export interface NodePositionChange {
   newPinnedY?: number;
 }
 
+export interface HopDistanceConfig {
+  hop1Radius: number;
+  hop2Gap: number;
+  hop3Gap: number;
+  nodeArcSpacing: number;
+}
+
 export interface PluginSettings {
   defaultCircleRadius: number;
+  hop1Radius: number;
+  hop2Gap: number;
+  hop3Gap: number;
+  nodeArcSpacing: number;
   gridSize: number;
   enableMarqueeSelection: boolean;
   autoCenterActiveNote: boolean;
@@ -104,7 +115,11 @@ export interface PluginSettings {
 }
 
 export const DEFAULT_SETTINGS: PluginSettings = {
-  defaultCircleRadius: 180,
+  defaultCircleRadius: 160,
+  hop1Radius: 160,
+  hop2Gap: 160,
+  hop3Gap: 160,
+  nodeArcSpacing: 18,
   gridSize: 50,
   enableMarqueeSelection: true,
   autoCenterActiveNote: true,
