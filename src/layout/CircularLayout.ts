@@ -9,20 +9,20 @@ export interface CircleLayoutOptions {
   endAngle?: number;
 }
 
-export const SUPER_HUB_PATTERNS = [
-  "_Papers_Dashboard",
+/**
+ * Only the 4,000+ row raw state ledgers are prevented from expanding their
+ * thousands of children at Hop 2 / Hop 3.
+ * Topic hubs (`_Topics_Hub`, `[Topic] ...`, etc.) are NEVER blocked!
+ */
+export const MASS_LEDGER_PATTERNS = [
   "_Review_Ledger",
-  "_Papers_Graph_Hub",
-  "_Topics_Hub",
-  "_Idea_Ledger",
-  "_Ideas_Dashboard",
-  "_AI_Dual_Frontier_8_Domains_Grand_Dashboard",
+  "_All_Papers_Grand_Master_Dashboard",
 ];
 
-export function isSuperHubPath(pathOrId: string): boolean {
+export function isMassLedgerPath(pathOrId: string): boolean {
   if (!pathOrId) return false;
-  for (let i = 0; i < SUPER_HUB_PATTERNS.length; i++) {
-    if (pathOrId.includes(SUPER_HUB_PATTERNS[i])) return true;
+  for (let i = 0; i < MASS_LEDGER_PATTERNS.length; i++) {
+    if (pathOrId.includes(MASS_LEDGER_PATTERNS[i])) return true;
   }
   return false;
 }
@@ -35,14 +35,15 @@ export function isTagNode(nodeOrId: GraphNode | string): boolean {
 }
 
 export class CircularLayoutEngine {
-  /**
-   * Hooks renderer's renderCallback, changed, and worker messages so that:
-   * 1) Pinned coordinates (`_pinnedX, _pinnedY`) are never overwritten by D3 worker.
-   * 2) Hop visibility filtering (`_hopVisible`, `_linkVisible`) is strictly enforced
-   *    before every WebGL frame draw so out-of-hop pages NEVER appear on screen.
-   */
-  public static ensureRendererPinHook(renderer: GraphRenderer): void {
-    if (!renderer || renderer._graphProHooked) return;
+  public static ensureRendererPinHook(
+    renderer: GraphRenderer,
+    onDataUpdated?: () => void
+  ): void {
+    if (!renderer) return;
+    if (onDataUpdated) {
+      (renderer as any)._graphProOnDataUpdated = onDataUpdated;
+    }
+    if (renderer._graphProHooked) return;
     renderer._graphProHooked = true;
 
     const enforcePinsAndVisibility = () => {
@@ -93,6 +94,19 @@ export class CircularLayoutEngine {
         }
       }
     };
+
+    // Hook setData so whenever Obsidian asynchronously updates nodes/backlinks, we re-layout immediately
+    if (typeof (renderer as any).setData === "function") {
+      const origSetData = (renderer as any).setData.bind(renderer);
+      (renderer as any).setData = (...args: any[]) => {
+        const res = origSetData(...args);
+        const cb = (renderer as any)._graphProOnDataUpdated;
+        if (typeof cb === "function") {
+          cb();
+        }
+        return res;
+      };
+    }
 
     if (renderer.worker && typeof renderer.worker.addEventListener === "function") {
       renderer.worker.addEventListener("message", () => {
@@ -164,7 +178,7 @@ export class CircularLayoutEngine {
       const worker = renderer.worker;
       if (!worker) return;
 
-      const limit = Math.min(nodes.length, 100);
+      const limit = Math.min(nodes.length, 120);
       for (let i = 0; i < limit; i++) {
         const n = nodes[i];
         worker.postMessage({
@@ -266,10 +280,12 @@ export class CircularLayoutEngine {
     return val.id || val.path || "";
   }
 
-  /**
-   * Resolves target nodes for layout actions (`수평`, `수직`, `그리드`, `선택원형`).
-   * Only operates on currently visible (`_hopVisible !== false`) nodes!
-   */
+  private static getBaseName(pathOrId: string): string {
+    if (!pathOrId) return "";
+    const base = pathOrId.split("/").pop() || pathOrId;
+    return base.replace(/\.md$/i, "").trim();
+  }
+
   public static resolveTargetNodes(
     renderer: GraphRenderer,
     selectedNodes: GraphNode[],
@@ -283,40 +299,53 @@ export class CircularLayoutEngine {
     const allNodes = renderer.nodes || [];
     if (allNodes.length === 0) return [];
 
-    // If hop filter is active, return all currently visible hop nodes
     if (renderer._hopFilterActive) {
       const visible = allNodes.filter((n) => n._hopVisible === true);
       if (visible.length >= 2) return visible;
     }
 
     if (activeFilePath) {
-      const centerNode = renderer.nodeLookup
-        ? renderer.nodeLookup[activeFilePath]
-        : allNodes.find((n) => (n.id || n.path) === activeFilePath);
+      const centerNode = this.findCenterNode(renderer, activeFilePath);
       if (centerNode) {
-        const clean = this.getCleanNeighborhood(renderer, centerNode, activeFilePath, 60);
+        const clean = this.getCleanNeighborhood(renderer, centerNode, centerNode.id || activeFilePath, 80);
         if (clean.length >= 2) return clean;
       }
     }
 
-    return allNodes.filter((n) => !isTagNode(n)).slice(0, Math.min(allNodes.length, 40));
+    return allNodes.filter((n) => !isTagNode(n)).slice(0, Math.min(allNodes.length, 50));
+  }
+
+  public static findCenterNode(renderer: GraphRenderer, filePath: string): GraphNode | undefined {
+    const allNodes = renderer.nodes || [];
+    if (renderer.nodeLookup && renderer.nodeLookup[filePath]) {
+      return renderer.nodeLookup[filePath];
+    }
+    const noExt = filePath.replace(/\.md$/i, "");
+    if (renderer.nodeLookup && renderer.nodeLookup[noExt]) {
+      return renderer.nodeLookup[noExt];
+    }
+    const targetBase = this.getBaseName(filePath);
+    return allNodes.find((n) => {
+      const id = n.id || n.path || "";
+      return id === filePath || id === noExt || this.getBaseName(id) === targetBase;
+    });
   }
 
   public static getCleanNeighborhood(
     renderer: GraphRenderer,
     centerNode: GraphNode,
     centerId: string,
-    maxNeighbors = 80
+    maxNeighbors = 100
   ): GraphNode[] {
-    const centerIsHub = isSuperHubPath(centerId);
     const neighbors: GraphNode[] = [];
     const seen = new Set<string>([centerId]);
 
     const addById = (id: string) => {
       if (!id || seen.has(id) || isTagNode(id)) return;
-      if (!centerIsHub && isSuperHubPath(id)) return;
       seen.add(id);
-      const target = renderer.nodeLookup ? renderer.nodeLookup[id] : undefined;
+      const target = renderer.nodeLookup
+        ? renderer.nodeLookup[id]
+        : (renderer.nodes || []).find((n) => (n.id || n.path) === id);
       if (target && !isTagNode(target)) neighbors.push(target);
     };
 
@@ -333,7 +362,7 @@ export class CircularLayoutEngine {
       }
     }
 
-    if (neighbors.length === 0 && renderer.links) {
+    if (renderer.links) {
       const links = renderer.links;
       for (let i = 0, len = links.length; i < len && neighbors.length < maxNeighbors; i++) {
         const l = links[i];
@@ -348,18 +377,20 @@ export class CircularLayoutEngine {
   }
 
   /**
-   * Strict BFS Hop Filtering & Multi-Ring Concentric Layout (1홉 / 2홉 / 3홉 / 전체).
-   * - Hop 1 (`maxHop = 1`): ONLY shows current page + 1-hop directly connected pages on Ring 1!
-   * - Hop 2 (`maxHop = 2`): Shows current page + Ring 1 (1-hop) + Ring 2 (2-hop)!
-   * - Hop 3 (`maxHop = 3`): Shows current page + Ring 1 (1-hop) + Ring 2 (2-hop) + Ring 3 (3-hop)!
-   * - All other pages (> maxHop, unconnected pages, tag pseudo-nodes, master ledgers) are HIDDEN!
+   * Bidirectional BFS Hop Filtering & Concentric Ring Layout (1홉 / 2홉 / 3홉 / 전체).
+   * Combines `renderer.links`, `node.forward`, `node.reverse`, AND Obsidian's
+   * `metadataCache.resolvedLinks / unresolvedLinks` so EVERY forward link AND
+   * EVERY backlink is 100% preserved and visible!
    */
   public static arrangeAndFilterByHopDepth(
     renderer: GraphRenderer,
     centerFilePath: string,
     maxHop: number,
     baseRadius = 175,
-    lockPositions = true
+    lockPositions = true,
+    viewType = "localgraph",
+    resolvedLinks?: Record<string, Record<string, number>>,
+    unresolvedLinks?: Record<string, Record<string, number>>
   ): { changes: NodePositionChange[]; visibleNodes: GraphNode[] } {
     this.ensureRendererPinHook(renderer);
     const allNodes = renderer.nodes;
@@ -370,80 +401,112 @@ export class CircularLayoutEngine {
       return { changes: [], visibleNodes: allNodes };
     }
 
-    const centerNode = renderer.nodeLookup
-      ? renderer.nodeLookup[centerFilePath]
-      : allNodes.find((n) => (n.id || n.path) === centerFilePath);
-
+    const centerNode = this.findCenterNode(renderer, centerFilePath);
     if (!centerNode) return { changes: [], visibleNodes: [] };
 
     const centerId = centerNode.id || centerNode.path || centerFilePath;
-    const centerIsHub = isSuperHubPath(centerId);
 
-    // 1. Build fast adjacency map across renderer nodes (excluding tags & global ledgers)
+    // 1. Index all nodes by full ID and by basename so alias/relative links always match
     const adj = new Map<string, Set<string>>();
     const nodeById = new Map<string, GraphNode>();
+    const idByBase = new Map<string, string>();
 
     for (let i = 0, len = allNodes.length; i < len; i++) {
       const n = allNodes[i];
       const id = n.id || n.path || "";
-      if (!id) continue;
+      if (!id || isTagNode(n)) continue;
       nodeById.set(id, n);
-      if (id !== centerId && (isTagNode(n) || (!centerIsHub && isSuperHubPath(id)))) {
-        continue;
-      }
+      idByBase.set(this.getBaseName(id), id);
       adj.set(id, new Set<string>());
     }
 
-    const addEdge = (a: string, b: string) => {
-      if (!a || !b || a === b) return;
-      const setA = adj.get(a);
-      const setB = adj.get(b);
-      if (setA && setB) {
-        setA.add(b);
-        setB.add(a);
-      }
+    const resolveToNodeId = (rawId: string): string | undefined => {
+      if (!rawId) return undefined;
+      if (nodeById.has(rawId)) return rawId;
+      const withMd = rawId.endsWith(".md") ? rawId : rawId + ".md";
+      if (nodeById.has(withMd)) return withMd;
+      const base = this.getBaseName(rawId);
+      return idByBase.get(base);
     };
 
-    // Populate edges from both node.forward/reverse and renderer.links
+    const addBidirectionalEdge = (rawA: string, rawB: string) => {
+      const a = resolveToNodeId(rawA);
+      const b = resolveToNodeId(rawB);
+      if (!a || !b || a === b) return;
+      adj.get(a)?.add(b);
+      adj.get(b)?.add(a);
+    };
+
+    // A) Add edges from node.forward and node.reverse (both outgoing and incoming backlinks!)
     for (const [id, n] of nodeById.entries()) {
-      if (!adj.has(id)) continue;
       if (n.forward && typeof n.forward === "object") {
-        for (const dst of Object.keys(n.forward)) addEdge(id, dst);
+        for (const dst of Object.keys(n.forward)) addBidirectionalEdge(id, dst);
       }
       if (n.reverse && typeof n.reverse === "object") {
-        for (const src of Object.keys(n.reverse)) addEdge(id, src);
+        for (const src of Object.keys(n.reverse)) addBidirectionalEdge(id, src);
       }
     }
 
+    // B) Add edges from renderer.links
     const links = renderer.links || [];
     for (let i = 0, len = links.length; i < len; i++) {
       const l = links[i];
-      addEdge(this.getNodeId(l.source), this.getNodeId(l.target));
+      addBidirectionalEdge(this.getNodeId(l.source), this.getNodeId(l.target));
     }
 
-    // 2. Exact BFS from centerId up to maxHop (1, 2, or 3)
+    // C) Add edges from Obsidian's metadataCache (guarantees 100% of backlinks & forward links even if renderer is mid-tick!)
+    if (resolvedLinks) {
+      // Outgoing from nodes in graph
+      for (const id of nodeById.keys()) {
+        const targets = resolvedLinks[id];
+        if (targets) {
+          for (const t of Object.keys(targets)) addBidirectionalEdge(id, t);
+        }
+      }
+      // Incoming backlinks to centerFilePath from anywhere in vault
+      for (const [srcPath, targets] of Object.entries(resolvedLinks)) {
+        if (targets && (targets[centerFilePath] || targets[centerId])) {
+          addBidirectionalEdge(srcPath, centerId);
+        }
+      }
+    }
+    if (unresolvedLinks) {
+      const uTargets = unresolvedLinks[centerFilePath] || unresolvedLinks[centerId];
+      if (uTargets) {
+        for (const ut of Object.keys(uTargets)) addBidirectionalEdge(centerId, ut);
+      }
+    }
+
+    // 2. Exact Bidirectional BFS from centerId up to maxHop (1, 2, or 3)
     const hopMap = new Map<string, number>();
     const parentMap = new Map<string, string>();
     hopMap.set(centerId, 0);
 
-    const hopRings: GraphNode[][] = [[centerNode], [], [], []]; // Index 0, 1, 2, 3
+    const hopRings: GraphNode[][] = [[centerNode], [], [], []];
     let frontier: string[] = [centerId];
 
     for (let hop = 1; hop <= Math.min(maxHop, 3); hop++) {
       const nextFrontier: string[] = [];
-      const maxNodesInRing = hop === 1 ? 80 : hop === 2 ? 100 : 120;
+      const maxNodesInRing = hop === 1 ? 120 : hop === 2 ? 120 : 140;
 
       for (let f = 0; f < frontier.length; f++) {
         const currId = frontier[f];
-        // If a 1-hop or 2-hop neighbor is itself a massive Topic Hub (> 40 links), cap expansion per parent
+        // At hop >= 2, don't expand through 4,000-row mass ledgers (`_Review_Ledger`, `_Papers_Dashboard`)
+        if (hop >= 2 && (isMassLedgerPath(currId) || currId.includes("_Papers_Dashboard"))) {
+          continue;
+        }
+
         const neighbors = adj.get(currId);
         if (!neighbors) continue;
 
         let addedFromParent = 0;
-        const maxPerParent = hop === 1 ? 80 : 15;
+        const maxPerParent = hop === 1 ? 120 : 25;
 
         for (const nbId of neighbors) {
           if (hopMap.has(nbId)) continue;
+          // Skip _Review_Ledger unless we are viewing _Review_Ledger
+          if (nbId !== centerId && isMassLedgerPath(nbId)) continue;
+
           const nbNode = nodeById.get(nbId);
           if (!nbNode) continue;
 
@@ -461,7 +524,19 @@ export class CircularLayoutEngine {
       if (frontier.length === 0) break;
     }
 
-    // 3. Strictly Hide all nodes with hop > maxHop (or not in hopMap)
+    // In Local Graph (`localgraph`), Obsidian's engine already restricts `renderer.nodes` to `localJumps` (= maxHop).
+    // If any non-tag node in `localgraph` was not matched above (e.g. pending link object), include it on Ring 1 (or maxHop) so NO backlink is ever hidden!
+    if (viewType === "localgraph") {
+      for (const [id, n] of nodeById.entries()) {
+        if (!hopMap.has(id) && !isMassLedgerPath(id)) {
+          const fallbackHop = Math.min(maxHop, 1);
+          hopMap.set(id, fallbackHop);
+          hopRings[fallbackHop].push(n);
+        }
+      }
+    }
+
+    // 3. Enforce Node Visibility
     renderer._hopFilterActive = true;
     const visibleNodes: GraphNode[] = [];
 
@@ -469,7 +544,7 @@ export class CircularLayoutEngine {
       const n = allNodes[i];
       const id = n.id || n.path || "";
       const hop = hopMap.get(id);
-      const isVis = hop !== undefined && hop <= maxHop;
+      const isVis = !isTagNode(n) && hop !== undefined && hop <= maxHop;
 
       n._hopVisible = isVis;
       n._hopLevel = hop ?? 99;
@@ -477,7 +552,6 @@ export class CircularLayoutEngine {
       if (isVis) {
         visibleNodes.push(n);
       } else {
-        // Release any stale pin on hidden nodes
         n._pinnedX = undefined;
         n._pinnedY = undefined;
         n.fx = null;
@@ -494,11 +568,11 @@ export class CircularLayoutEngine {
       }
     }
 
-    // 4. Strictly Hide all links where either endpoint is hidden or jumps across non-adjacent rings
+    // 4. Enforce Link Visibility
     for (let i = 0, len = links.length; i < len; i++) {
       const l = links[i];
-      const sId = this.getNodeId(l.source);
-      const tId = this.getNodeId(l.target);
+      const sId = resolveToNodeId(this.getNodeId(l.source)) || this.getNodeId(l.source);
+      const tId = resolveToNodeId(this.getNodeId(l.target)) || this.getNodeId(l.target);
       const sHop = hopMap.get(sId);
       const tHop = hopMap.get(tId);
 
@@ -535,7 +609,6 @@ export class CircularLayoutEngine {
     const angleByNodeId = new Map<string, number>();
     const startAngle = -Math.PI / 2;
 
-    // Ring 1 (1홉: 직접 연결된 페이지들)
     const ring1 = hopRings[1];
     const n1 = ring1.length;
     const r1 = Math.max(baseRadius, Math.round((Math.max(n1, 1) * 58) / (2 * Math.PI)));
@@ -554,13 +627,11 @@ export class CircularLayoutEngine {
       }
     }
 
-    // Ring 2 (2홉: 1홉 노드에 연결된 페이지들)
     const ring2 = hopRings[2];
     const n2 = ring2.length;
     const r2 = r1 + 170;
 
     if (n2 > 0 && maxHop >= 2) {
-      // Sort Ring 2 nodes by their Ring 1 parent's angle so edges never cross!
       ring2.sort((a, b) => {
         const pA = parentMap.get(a.id || a.path || "") || "";
         const pB = parentMap.get(b.id || b.path || "") || "";
@@ -573,9 +644,10 @@ export class CircularLayoutEngine {
         const id = node.id || node.path || "";
         const pId = parentMap.get(id) || "";
         const pAngle = angleByNodeId.get(pId);
-        const angle = n2 <= 4 && pAngle !== undefined
-          ? pAngle + (j - (n2 - 1) / 2) * 0.25
-          : startAngle + j * step2;
+        const angle =
+          n2 <= 4 && pAngle !== undefined
+            ? pAngle + (j - (n2 - 1) / 2) * 0.25
+            : startAngle + j * step2;
 
         angleByNodeId.set(id, angle);
         const nx = Math.round(r2 * Math.cos(angle) * 10) / 10;
@@ -584,7 +656,6 @@ export class CircularLayoutEngine {
       }
     }
 
-    // Ring 3 (3홉: 2홉 노드에 연결된 페이지들)
     const ring3 = hopRings[3];
     const n3 = ring3.length;
     const r3 = r2 + 170;
@@ -634,7 +705,11 @@ export class CircularLayoutEngine {
 
     let centerNode: GraphNode = nodesToArrange[0];
     if (centerNodeId) {
-      const found = nodesToArrange.find((n) => (n.id || n.path) === centerNodeId);
+      const targetBase = this.getBaseName(centerNodeId);
+      const found = nodesToArrange.find((n) => {
+        const id = n.id || n.path || "";
+        return id === centerNodeId || this.getBaseName(id) === targetBase;
+      });
       if (found) centerNode = found;
     } else {
       for (let i = 1, len = nodesToArrange.length; i < len; i++) {

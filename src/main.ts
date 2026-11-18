@@ -4,7 +4,7 @@ import { GraphProSettingsTab } from "./settings/SettingsTab";
 import { MarqueeSelectionManager } from "./selection/MarqueeSelection";
 import { GraphToolbarManager } from "./ui/GraphToolbar";
 import { DeltaHistoryManager } from "./history/DeltaHistory";
-import { CircularLayoutEngine, isSuperHubPath } from "./layout/CircularLayout";
+import { CircularLayoutEngine, isMassLedgerPath } from "./layout/CircularLayout";
 import { AlignmentEngine } from "./layout/AlignmentEngine";
 
 interface LeafEnhancement {
@@ -228,6 +228,8 @@ export default class GraphProNextPlugin extends Plugin {
     if (vt === "localgraph" && view.engine?.options) {
       const targetJumps = Math.max(1, depth);
       view.engine.options.localJumps = targetJumps;
+      view.engine.options.localBacklinks = true;
+      view.engine.options.localForelinks = true;
       view.engine.options.showTags = false;
       view.engine.options.localInterlinks = false;
       if (view.engine.filterOptions?.jumps?.setValue) {
@@ -260,9 +262,12 @@ export default class GraphProNextPlugin extends Plugin {
     const renderer = view.renderer as GraphRenderer;
     if (!renderer) return;
 
-    CircularLayoutEngine.ensureRendererPinHook(renderer);
+    CircularLayoutEngine.ensureRendererPinHook(renderer, () => {
+      if (this.autoFollow && this.activeFilePath) {
+        this.executeCenterAndOrbit(leaf, this.activeFilePath, false);
+      }
+    });
 
-    // Sync initial depth from localgraph if present
     if (view.getViewType() === "localgraph" && view.engine?.options?.localJumps) {
       this.hopDepth = view.engine.options.localJumps;
     }
@@ -306,6 +311,7 @@ export default class GraphProNextPlugin extends Plugin {
           this.detectActiveFile();
           return this.activeFilePath;
         },
+        getResolvedLinks: () => (this.app.metadataCache as any)?.resolvedLinks,
         centerAndOrbitOnActive: (showNotice) => {
           this.detectActiveFile();
           if (this.activeFilePath) {
@@ -367,7 +373,7 @@ export default class GraphProNextPlugin extends Plugin {
     let cx = 0;
     let cy = 0;
     const centerNode = centerId
-      ? targetList.find((n) => (n.id || n.path) === centerId)
+      ? CircularLayoutEngine.findCenterNode(renderer, centerId)
       : undefined;
 
     let minX = Infinity,
@@ -413,10 +419,6 @@ export default class GraphProNextPlugin extends Plugin {
     if (renderer.changed) renderer.changed();
   }
 
-  /**
-   * Executes immediately AND schedules follow-up passes at 65ms and 165ms whenever
-   * Obsidian's LocalGraph engine asynchronously updates its node set (e.g. on file switch or depth change).
-   */
   private scheduleCenterAndOrbit(
     leaf: WorkspaceLeaf,
     filePath: string,
@@ -437,8 +439,11 @@ export default class GraphProNextPlugin extends Plugin {
       }, 65);
       const t2 = window.setTimeout(() => {
         this.executeCenterAndOrbit(leaf, filePath, false);
-      }, 165);
-      enh.timers.push(t1, t2);
+      }, 180);
+      const t3 = window.setTimeout(() => {
+        this.executeCenterAndOrbit(leaf, filePath, false);
+      }, 360);
+      enh.timers.push(t1, t2, t3);
     }
   }
 
@@ -450,15 +455,28 @@ export default class GraphProNextPlugin extends Plugin {
     if (!renderer) return false;
 
     if (vt === "localgraph" && view.engine?.options) {
-      const desiredSearch = isSuperHubPath(filePath)
-        ? "-file:_Review_Ledger"
-        : "-file:_Papers_Dashboard -file:_Review_Ledger -file:_Papers_Graph_Hub";
+      // Only exclude the 7,390-line raw state ledger (`_Review_Ledger`).
+      // NEVER exclude `_Topics_Hub` or `_Papers_Dashboard` so backlinks to hubs are ALWAYS visible!
+      const desiredSearch = isMassLedgerPath(filePath)
+        ? ""
+        : "-file:_Review_Ledger -file:_All_Papers_Grand_Master_Dashboard";
 
       const targetJumps = Math.max(1, this.hopDepth);
       let needsRender = false;
 
       if (view.engine.options.search !== desiredSearch) {
         view.engine.options.search = desiredSearch;
+        if (view.engine.filterOptions?.search?.setValue) {
+          view.engine.filterOptions.search.setValue(desiredSearch);
+        }
+        needsRender = true;
+      }
+      if (view.engine.options.localBacklinks !== true) {
+        view.engine.options.localBacklinks = true;
+        needsRender = true;
+      }
+      if (view.engine.options.localForelinks !== true) {
+        view.engine.options.localForelinks = true;
         needsRender = true;
       }
       if (view.engine.options.showTags !== false) {
@@ -473,9 +491,16 @@ export default class GraphProNextPlugin extends Plugin {
         view.engine.options.localJumps = targetJumps;
         needsRender = true;
       }
-      if (view.engine.options.localFile !== filePath) {
+      if (view.file?.path !== filePath || view.engine.options.localFile !== filePath) {
         const targetFile = this.app.vault.getAbstractFileByPath(filePath);
-        if (targetFile) view.file = targetFile;
+        if (targetFile) {
+          view.file = targetFile;
+          if (typeof view.onFileOpen === "function") {
+            try {
+              view.onFileOpen(targetFile);
+            } catch (_) {}
+          }
+        }
         view.engine.options.localFile = filePath;
         needsRender = true;
       }
@@ -485,20 +510,19 @@ export default class GraphProNextPlugin extends Plugin {
       }
     }
 
-    const node = renderer.nodeLookup
-      ? renderer.nodeLookup[filePath]
-      : (renderer.nodes || []).find((n) => (n.id || n.path) === filePath);
-
+    const node = CircularLayoutEngine.findCenterNode(renderer, filePath);
     if (!node) return false;
 
-    // Apply strict BFS Hop Filtering (1홉 / 2홉 / 3홉 / 전체) & Concentric Rings in BOTH Local and Global Graph!
     const effectiveHop = vt === "localgraph" ? Math.max(1, this.hopDepth) : this.hopDepth;
     const res = CircularLayoutEngine.arrangeAndFilterByHopDepth(
       renderer,
       filePath,
       effectiveHop,
       this.settings.defaultCircleRadius,
-      this.circularLocked
+      this.circularLocked,
+      vt,
+      (this.app.metadataCache as any)?.resolvedLinks,
+      (this.app.metadataCache as any)?.unresolvedLinks
     );
 
     if (showNotice && res.changes.length > 0) {

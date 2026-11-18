@@ -12,6 +12,7 @@ export interface ToolbarCallbacks {
   clearSelection: () => void;
   getRenderer: () => GraphRenderer | undefined;
   getActiveFilePath: () => string | null;
+  getResolvedLinks: () => Record<string, Record<string, number>> | undefined;
   centerAndOrbitOnActive: (showNotice: boolean) => void;
   fitCameraToNodes: (nodes: GraphNode[], centerId?: string | null) => void;
   isAutoFollow: () => boolean;
@@ -76,10 +77,9 @@ export class GraphToolbarManager {
       true
     );
 
-    // Hop Depth Selector (1홉 / 2홉 / 3홉 / 전체) - Always available in both Local and Global Graph!
     const curDepth = this.callbacks.getHopDepth();
     const hopOptions: Array<{ depth: number; label: string; desc: string }> = [
-      { depth: 1, label: "1홉", desc: "현재 페이지와 직접(1차) 연결된 페이지만 원형으로 표시 (단축키: 1)" },
+      { depth: 1, label: "1홉", desc: "현재 페이지와 직접(1차: 역링크+후속링크) 연결된 페이지만 원형으로 표시 (단축키: 1)" },
       { depth: 2, label: "2홉", desc: "현재 페이지 + 1차(내원) + 2차(외원) 연결 페이지까지 2단 동심원으로 표시 (단축키: 2)" },
       { depth: 3, label: "3홉", desc: "현재 페이지 + 1차 + 2차 + 3차 연결 페이지까지 3단 동심원으로 표시 (단축키: 3)" },
     ];
@@ -187,7 +187,8 @@ export class GraphToolbarManager {
       const res = LinkExpansionEngine.selectAndArrangeBacklinks(
         renderer,
         this.callbacks.getSelectedNodes(),
-        activeFile
+        activeFile,
+        this.callbacks.getResolvedLinks()
       );
       if (res.nodes.length <= 1) {
         new Notice("⬅️ 연결된 역링크(Backlinks) 노드가 없습니다.");
@@ -206,7 +207,8 @@ export class GraphToolbarManager {
       const res = LinkExpansionEngine.selectAndArrangeOutgoingLinks(
         renderer,
         this.callbacks.getSelectedNodes(),
-        activeFile
+        activeFile,
+        this.callbacks.getResolvedLinks()
       );
       if (res.nodes.length <= 1) {
         new Notice("➡️ 연결된 후속 링크(Outgoing) 노드가 없습니다.");
