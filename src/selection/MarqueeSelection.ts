@@ -1,7 +1,7 @@
 import { GraphNode, GraphRenderer } from "../types";
 
 export interface MarqueeCallback {
-  onSelectionChanged: (selectedNodes: GraphNode[]) => void;
+  onSelectionChanged: (selectedNodes: GraphNode[], isFinal: boolean) => void;
 }
 
 export class MarqueeSelectionManager {
@@ -11,74 +11,104 @@ export class MarqueeSelectionManager {
   private selectionBoxEl: HTMLElement | null = null;
 
   private isSelecting = false;
+  private isDeselectMode = false;
   private startX = 0;
   private startY = 0;
   private currentX = 0;
   private currentY = 0;
+  private containerRect: DOMRect | null = null;
+  private rafId: number | null = null;
 
-  private selectedNodeIds = new Set<string>();
+  // Flat contiguous Float32Array spatial cache built once per drag start
+  private cachedCoords: Float32Array = new Float32Array(0);
+  private cachedNodes: GraphNode[] = [];
+  private selectedIndices = new Set<number>();
+  private lastSelectionHash = -1;
 
   constructor(containerEl: HTMLElement, renderer: GraphRenderer, callback: MarqueeCallback) {
     this.containerEl = containerEl;
     this.renderer = renderer;
     this.callback = callback;
-    this.initEvents();
-  }
-
-  private initEvents(): void {
     this.containerEl.addEventListener("mousedown", this.onMouseDown, true);
-    window.addEventListener("mousemove", this.onMouseMove, true);
-    window.addEventListener("mouseup", this.onMouseUp, true);
   }
 
   public destroy(): void {
     this.containerEl.removeEventListener("mousedown", this.onMouseDown, true);
-    window.removeEventListener("mousemove", this.onMouseMove, true);
-    window.removeEventListener("mouseup", this.onMouseUp, true);
+    this.detachDragListeners();
     this.removeBox();
   }
 
+  private detachDragListeners(): void {
+    window.removeEventListener("mousemove", this.onMouseMove, true);
+    window.removeEventListener("mouseup", this.onMouseUp, true);
+    if (this.rafId !== null) {
+      cancelAnimationFrame(this.rafId);
+      this.rafId = null;
+    }
+  }
+
   private onMouseDown = (evt: MouseEvent): void => {
-    // Activate only when Shift is held down
     if (!evt.shiftKey || evt.button !== 0) return;
 
-    const rect = this.containerEl.getBoundingClientRect();
-    this.startX = evt.clientX - rect.left;
-    this.startY = evt.clientY - rect.top;
+    this.containerRect = this.containerEl.getBoundingClientRect();
+    this.startX = evt.clientX - this.containerRect.left;
+    this.startY = evt.clientY - this.containerRect.top;
     this.currentX = this.startX;
     this.currentY = this.startY;
     this.isSelecting = true;
+    this.isDeselectMode = evt.altKey;
+    this.lastSelectionHash = -1;
 
-    if (!evt.altKey) {
-      this.selectedNodeIds.clear();
+    // Build flat Float32Array spatial cache ONCE at drag start
+    const nodes = this.renderer.nodes || [];
+    const len = nodes.length;
+    this.cachedNodes = nodes;
+    if (this.cachedCoords.length < len * 2) {
+      this.cachedCoords = new Float32Array(len * 2);
+    }
+    for (let i = 0; i < len; i++) {
+      this.cachedCoords[i * 2] = nodes[i].x;
+      this.cachedCoords[i * 2 + 1] = nodes[i].y;
+    }
+
+    if (!this.isDeselectMode) {
+      this.selectedIndices.clear();
     }
 
     evt.preventDefault();
     evt.stopPropagation();
 
     this.createOrUpdateBox();
+
+    // Only attach global move/up listeners while actively dragging
+    window.addEventListener("mousemove", this.onMouseMove, true);
+    window.addEventListener("mouseup", this.onMouseUp, true);
   };
 
   private onMouseMove = (evt: MouseEvent): void => {
-    if (!this.isSelecting) return;
+    if (!this.isSelecting || !this.containerRect) return;
 
-    const rect = this.containerEl.getBoundingClientRect();
-    this.currentX = Math.max(0, Math.min(rect.width, evt.clientX - rect.left));
-    this.currentY = Math.max(0, Math.min(rect.height, evt.clientY - rect.top));
+    this.currentX = Math.max(0, Math.min(this.containerRect.width, evt.clientX - this.containerRect.left));
+    this.currentY = Math.max(0, Math.min(this.containerRect.height, evt.clientY - this.containerRect.top));
 
     this.createOrUpdateBox();
-    this.computeEnclosedNodes(evt.altKey);
+
+    if (this.rafId === null) {
+      this.rafId = requestAnimationFrame(() => {
+        this.rafId = null;
+        if (this.isSelecting) {
+          this.computeEnclosedNodes(false);
+        }
+      });
+    }
   };
 
-  private onMouseUp = (evt: MouseEvent): void => {
+  private onMouseUp = (_evt: MouseEvent): void => {
     if (!this.isSelecting) return;
     this.isSelecting = false;
+    this.detachDragListeners();
     this.removeBox();
-
-    // Finalize selection
-    const allNodes = this.renderer.nodes || [];
-    const selected = allNodes.filter((n) => this.selectedNodeIds.has(n.id));
-    this.callback.onSelectionChanged(selected);
+    this.computeEnclosedNodes(true);
   };
 
   private createOrUpdateBox(): void {
@@ -93,8 +123,7 @@ export class MarqueeSelectionManager {
     const yMin = Math.min(this.startY, this.currentY);
     const yMax = Math.max(this.startY, this.currentY);
 
-    this.selectionBoxEl.style.left = `${xMin}px`;
-    this.selectionBoxEl.style.top = `${yMin}px`;
+    this.selectionBoxEl.style.transform = `translate3d(${xMin}px, ${yMin}px, 0)`;
     this.selectionBoxEl.style.width = `${xMax - xMin}px`;
     this.selectionBoxEl.style.height = `${yMax - yMin}px`;
   }
@@ -106,11 +135,7 @@ export class MarqueeSelectionManager {
     }
   }
 
-  /**
-   * Transforms screen selection coordinates into Graph World space ONCE.
-   * Compares world coordinates directly with node.x and node.y (Zero Allocations).
-   */
-  private computeEnclosedNodes(isDeselecting: boolean): void {
+  private computeEnclosedNodes(isFinal: boolean): void {
     const scale = this.renderer.scale || 1;
     const panX = this.renderer.panX || 0;
     const panY = this.renderer.panY || 0;
@@ -121,41 +146,51 @@ export class MarqueeSelectionManager {
     const yMin = Math.min(this.startY, this.currentY);
     const yMax = Math.max(this.startY, this.currentY);
 
-    // Inverse Matrix Projection: Screen -> Graph World
     const worldXMin = (xMin * dpr - panX) / scale;
     const worldXMax = (xMax * dpr - panX) / scale;
     const worldYMin = (yMin * dpr - panY) / scale;
     const worldYMax = (yMax * dpr - panY) / scale;
 
-    const allNodes = this.renderer.nodes || [];
+    const coords = this.cachedCoords;
+    const nodes = this.cachedNodes;
+    const len = nodes.length;
 
-    for (const node of allNodes) {
-      const inside =
-        node.x >= worldXMin &&
-        node.x <= worldXMax &&
-        node.y >= worldYMin &&
-        node.y <= worldYMax;
+    let hash = 0;
+    for (let i = 0; i < len; i++) {
+      const nx = coords[i * 2];
+      const ny = coords[i * 2 + 1];
+      const inside = nx >= worldXMin && nx <= worldXMax && ny >= worldYMin && ny <= worldYMax;
 
       if (inside) {
-        if (isDeselecting) {
-          this.selectedNodeIds.delete(node.id);
+        if (this.isDeselectMode) {
+          this.selectedIndices.delete(i);
         } else {
-          this.selectedNodeIds.add(node.id);
+          this.selectedIndices.add(i);
         }
+      } else if (!this.isDeselectMode) {
+        this.selectedIndices.delete(i);
+      }
+
+      if (this.selectedIndices.has(i)) {
+        hash = ((hash << 5) - hash + i) | 0;
       }
     }
 
-    const selected = allNodes.filter((n) => this.selectedNodeIds.has(n.id));
-    this.callback.onSelectionChanged(selected);
-  }
+    if (!isFinal && hash === this.lastSelectionHash) {
+      return; // Skip redundant re-renders when enclosed node set hasn't changed
+    }
+    this.lastSelectionHash = hash;
 
-  public getSelectedNodeIds(): Set<string> {
-    return this.selectedNodeIds;
+    const selected: GraphNode[] = [];
+    for (const idx of this.selectedIndices) {
+      if (nodes[idx]) selected.push(nodes[idx]);
+    }
+    this.callback.onSelectionChanged(selected, isFinal);
   }
 
   public clearSelection(): void {
-    this.selectedNodeIds.clear();
-    const allNodes = this.renderer.nodes || [];
-    this.callback.onSelectionChanged([]);
+    this.selectedIndices.clear();
+    this.lastSelectionHash = -1;
+    this.callback.onSelectionChanged([], true);
   }
 }

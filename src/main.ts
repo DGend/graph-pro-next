@@ -1,4 +1,4 @@
-import { Plugin, WorkspaceLeaf } from "obsidian";
+import { Notice, Plugin, WorkspaceLeaf } from "obsidian";
 import { DEFAULT_SETTINGS, PluginSettings, GraphNode, GraphRenderer } from "./types";
 import { GraphProSettingsTab } from "./settings/SettingsTab";
 import { MarqueeSelectionManager } from "./selection/MarqueeSelection";
@@ -11,6 +11,7 @@ interface LeafEnhancement {
   toolbar: GraphToolbarManager;
   marquee: MarqueeSelectionManager;
   selectedNodes: GraphNode[];
+  timers: number[];
 }
 
 export default class GraphProNextPlugin extends Plugin {
@@ -18,20 +19,30 @@ export default class GraphProNextPlugin extends Plugin {
   public history: DeltaHistoryManager = new DeltaHistoryManager();
   private enhancedLeaves = new Map<WorkspaceLeaf, LeafEnhancement>();
   private activeFilePath: string | null = null;
+  private autoFollow = true;
+  private circularLocked = true;
 
   async onload() {
     await this.loadSettings();
+    this.autoFollow = this.settings.autoCenterActiveNote;
+    this.circularLocked = this.settings.autoCircularInLocalGraph;
+
+    CircularLayoutEngine.initWorker();
     this.addSettingTab(new GraphProSettingsTab(this.app, this));
 
     this.app.workspace.onLayoutReady(() => {
       this.detectActiveFile();
-      this.enhanceAllLeaves();
+      this.enhanceAllLeaves(true);
     });
 
     this.registerEvent(
       this.app.workspace.on("file-open", (file) => {
         if (file && file.extension === "md") {
           this.activeFilePath = file.path;
+          this.refreshAllToolbars();
+          if (this.autoFollow) {
+            this.centerAllGraphs(file.path, false);
+          }
         }
       })
     );
@@ -39,22 +50,37 @@ export default class GraphProNextPlugin extends Plugin {
     this.registerEvent(
       this.app.workspace.on("active-leaf-change", (leaf) => {
         if (!leaf || !leaf.view) return;
-        const viewType = leaf.view.getViewType();
-        if (viewType === "markdown" && (leaf.view as any).file) {
+        const vt = leaf.view.getViewType();
+        if (vt === "markdown" && (leaf.view as any).file) {
           this.activeFilePath = (leaf.view as any).file.path;
-        } else if (viewType === "graph" || viewType === "localgraph") {
+          this.refreshAllToolbars();
+        } else if (vt === "graph" || vt === "localgraph") {
           this.enhanceLeaf(leaf);
+          if (this.autoFollow && this.activeFilePath) {
+            this.scheduleCenterAndOrbit(leaf, this.activeFilePath, false);
+          }
         }
       })
     );
 
     this.registerEvent(
       this.app.workspace.on("layout-change", () => {
-        this.enhanceAllLeaves();
+        this.enhanceAllLeaves(false);
       })
     );
 
-    // Global Commands
+    // Commands
+    this.addCommand({
+      id: "graph-pro-center-and-orbit",
+      name: "현재 페이지 중심 고정 및 주변 노드 원형 배치 (Center & Circular Orbit)",
+      callback: () => {
+        this.detectActiveFile();
+        if (this.activeFilePath) {
+          this.centerAllGraphs(this.activeFilePath, true);
+        }
+      },
+    });
+
     this.addCommand({
       id: "graph-pro-arrange-circle",
       name: "선택된 노드 원형 궤도 정렬 (Arrange Selected in Circle)",
@@ -68,8 +94,11 @@ export default class GraphProNextPlugin extends Plugin {
             centerNodeId: this.activeFilePath || undefined,
             baseRadius: this.settings.defaultCircleRadius,
             lockPositions: true,
+            freezeSimulation: true,
           });
           this.history.recordChange(res.changed);
+        } else if (this.activeFilePath) {
+          this.scheduleCenterAndOrbit(active, this.activeFilePath, true);
         }
       },
     });
@@ -83,8 +112,8 @@ export default class GraphProNextPlugin extends Plugin {
         const enh = this.enhancedLeaves.get(active);
         const renderer = this.getRenderer(active);
         if (enh && renderer && enh.selectedNodes.length > 1) {
-          const changes = AlignmentEngine.alignHorizontal(renderer, enh.selectedNodes);
-          this.history.recordChange(changes);
+          CircularLayoutEngine.freezeSimulation(renderer);
+          this.history.recordChange(AlignmentEngine.alignHorizontal(renderer, enh.selectedNodes));
         }
       },
     });
@@ -100,14 +129,20 @@ export default class GraphProNextPlugin extends Plugin {
       },
     });
 
-    // Global Key Listener for Graph View
-    this.registerDomEvent(window, "keydown", (evt: KeyboardEvent) => {
-      this.handleGlobalKeyDown(evt);
-    }, true);
+    this.registerDomEvent(
+      window,
+      "keydown",
+      (evt: KeyboardEvent) => {
+        this.handleGlobalKeyDown(evt);
+      },
+      true
+    );
   }
 
   onunload() {
+    CircularLayoutEngine.destroyWorker();
     for (const [_, enh] of this.enhancedLeaves) {
+      for (const t of enh.timers) window.clearTimeout(t);
       enh.toolbar.destroy();
       enh.marquee.destroy();
     }
@@ -118,6 +153,16 @@ export default class GraphProNextPlugin extends Plugin {
     const file = this.app.workspace.getActiveFile();
     if (file && file.extension === "md") {
       this.activeFilePath = file.path;
+      return;
+    }
+    if (this.activeFilePath) return;
+    const mdLeaves = this.app.workspace.getLeavesOfType("markdown");
+    for (const leaf of mdLeaves) {
+      const f = (leaf.view as any)?.file;
+      if (f && f.path) {
+        this.activeFilePath = f.path;
+        return;
+      }
     }
   }
 
@@ -133,13 +178,33 @@ export default class GraphProNextPlugin extends Plugin {
     return (leaf.view as any)?.renderer;
   }
 
-  private enhanceAllLeaves(): void {
+  private enhanceAllLeaves(centerInitial: boolean): void {
     const leaves = [
       ...this.app.workspace.getLeavesOfType("graph"),
       ...this.app.workspace.getLeavesOfType("localgraph"),
     ];
     for (const leaf of leaves) {
       this.enhanceLeaf(leaf);
+      if (centerInitial && this.autoFollow && this.activeFilePath) {
+        this.scheduleCenterAndOrbit(leaf, this.activeFilePath, false);
+      }
+    }
+  }
+
+  private refreshAllToolbars(): void {
+    for (const [_, enh] of this.enhancedLeaves) {
+      enh.toolbar.refreshState();
+    }
+  }
+
+  private centerAllGraphs(filePath: string, showNotice: boolean): void {
+    const leaves = [
+      ...this.app.workspace.getLeavesOfType("graph"),
+      ...this.app.workspace.getLeavesOfType("localgraph"),
+    ];
+    for (const leaf of leaves) {
+      this.enhanceLeaf(leaf);
+      this.scheduleCenterAndOrbit(leaf, filePath, showNotice);
     }
   }
 
@@ -152,19 +217,26 @@ export default class GraphProNextPlugin extends Plugin {
     if (!renderer) return;
 
     const containerEl = view.contentEl as HTMLElement;
-    const selectedNodes: GraphNode[] = [];
 
-    const marquee = new MarqueeSelectionManager(containerEl, renderer, {
-      onSelectionChanged: (nodes) => {
+    const enhancement: LeafEnhancement = {
+      toolbar: null as any,
+      marquee: null as any,
+      selectedNodes: [],
+      timers: [],
+    };
+
+    enhancement.marquee = new MarqueeSelectionManager(containerEl, renderer, {
+      onSelectionChanged: (nodes, _isFinal) => {
         enhancement.selectedNodes = nodes;
         enhancement.toolbar.updateSelectionCount(nodes.length);
         this.highlightNodes(renderer, nodes);
       },
     });
 
-    const toolbar = new GraphToolbarManager(
+    enhancement.toolbar = new GraphToolbarManager(
       containerEl,
       {
+        getViewType: () => leaf.view.getViewType(),
         getSelectedNodes: () => enhancement.selectedNodes,
         setSelectedNodes: (nodes) => {
           enhancement.selectedNodes = nodes;
@@ -178,37 +250,273 @@ export default class GraphProNextPlugin extends Plugin {
           this.highlightNodes(renderer, []);
         },
         getRenderer: () => (leaf.view as any)?.renderer,
-        getActiveFilePath: () => this.activeFilePath,
+        getActiveFilePath: () => {
+          this.detectActiveFile();
+          return this.activeFilePath;
+        },
+        centerAndOrbitOnActive: (showNotice) => {
+          this.detectActiveFile();
+          if (this.activeFilePath) {
+            this.scheduleCenterAndOrbit(leaf, this.activeFilePath, showNotice);
+          }
+        },
+        isAutoFollow: () => this.autoFollow,
+        toggleAutoFollow: () => {
+          this.autoFollow = !this.autoFollow;
+          this.settings.autoCenterActiveNote = this.autoFollow;
+          this.saveSettings();
+          this.refreshAllToolbars();
+          if (this.autoFollow && this.activeFilePath) {
+            this.scheduleCenterAndOrbit(leaf, this.activeFilePath, true);
+          }
+        },
+        isCircularLocked: () => this.circularLocked,
+        toggleCircularLocked: () => {
+          this.circularLocked = !this.circularLocked;
+          this.settings.autoCircularInLocalGraph = this.circularLocked;
+          this.saveSettings();
+          this.refreshAllToolbars();
+          const r = this.getRenderer(leaf);
+          if (r) {
+            if (this.circularLocked && this.activeFilePath) {
+              this.executeCenterAndOrbit(leaf, this.activeFilePath, true);
+            } else {
+              CircularLayoutEngine.wakeSimulation(r, true);
+              new Notice("✨ 자유 물리 시뮬레이션 활성화");
+            }
+          }
+        },
+        setLocalDepth: (depth: number) => {
+          const eng = (leaf.view as any)?.engine;
+          if (eng && eng.options) {
+            eng.options.localJumps = depth;
+            if (typeof eng.render === "function") eng.render();
+            if (this.activeFilePath) {
+              this.scheduleCenterAndOrbit(leaf, this.activeFilePath, false);
+            }
+          }
+        },
+        getLocalDepth: () => {
+          return (leaf.view as any)?.engine?.options?.localJumps || 1;
+        },
       },
       this.history
     );
 
-    const enhancement: LeafEnhancement = {
-      toolbar,
-      marquee,
-      selectedNodes,
-    };
-
     this.enhancedLeaves.set(leaf, enhancement);
+  }
+
+  /**
+   * Non-blocking, zero-polling scheduler: executes immediately if nodes are ready,
+   * and schedules one lightweight follow-up after Obsidian finishes async node creation.
+   */
+  private scheduleCenterAndOrbit(leaf: WorkspaceLeaf, filePath: string, showNotice: boolean): void {
+    const enh = this.enhancedLeaves.get(leaf);
+    if (enh) {
+      for (const t of enh.timers) window.clearTimeout(t);
+      enh.timers = [];
+    }
+
+    const doneNow = this.executeCenterAndOrbit(leaf, filePath, showNotice);
+
+    if (enh) {
+      // Single lightweight follow-up at 60ms in case Obsidian recreated local graph nodes asynchronously
+      const t1 = window.setTimeout(() => {
+        this.executeCenterAndOrbit(leaf, filePath, !doneNow && showNotice);
+      }, 60);
+      enh.timers.push(t1);
+    }
+  }
+
+  /**
+   * Executes circular layout and camera centering in a SINGLE frame (0ms polling).
+   */
+  private executeCenterAndOrbit(leaf: WorkspaceLeaf, filePath: string, showNotice: boolean): boolean {
+    const view = leaf.view as any;
+    if (!view) return false;
+    const vt = view.getViewType();
+    const renderer = view.renderer as GraphRenderer;
+    if (!renderer) return false;
+
+    // Ensure Local Graph tracks active file without triggering expensive search rebuilds
+    if (vt === "localgraph" && view.engine?.options) {
+      if (view.engine.options.localFile !== filePath) {
+        const targetFile = this.app.vault.getAbstractFileByPath(filePath);
+        if (targetFile) view.file = targetFile;
+        view.engine.options.localFile = filePath;
+        if (typeof view.engine.render === "function") {
+          view.engine.render();
+        }
+      }
+    }
+
+    const node = renderer.nodeLookup
+      ? renderer.nodeLookup[filePath]
+      : (renderer.nodes || []).find((n) => (n.id || n.path) === filePath);
+
+    if (!node) return false;
+
+    // Apply 1-pass analytical circular layout around active center node
+    if (vt === "localgraph") {
+      CircularLayoutEngine.arrangeConcentricAroundCenter(
+        renderer,
+        filePath,
+        this.settings.defaultCircleRadius,
+        this.circularLocked
+      );
+    } else if (vt === "graph" && this.circularLocked && showNotice) {
+      // In Global Graph, when user explicitly triggers Center & Orbit (F), arrange 1-hop neighbors in a circle
+      const neighborhood = this.getDirectNeighborhood(renderer, node, filePath);
+      if (neighborhood.length > 1) {
+        CircularLayoutEngine.arrangeInCircle(renderer, neighborhood, {
+          centerNodeId: filePath,
+          baseRadius: this.settings.defaultCircleRadius,
+          lockPositions: true,
+          freezeSimulation: true,
+        });
+      }
+    }
+
+    // Instantaneous 1-frame camera centering (zero requestAnimationFrame loops)
+    const dpr = window.devicePixelRatio || 1;
+    const width = renderer.width || view.contentEl?.clientWidth || 600;
+    const height = renderer.height || view.contentEl?.clientHeight || 400;
+
+    let desiredScale = renderer.scale || 1.1;
+    if (vt === "localgraph") {
+      const allNodes = renderer.nodes || [];
+      let maxDist = 180;
+      for (let i = 0, len = allNodes.length; i < len; i++) {
+        const n = allNodes[i];
+        const dx = n.x - node.x;
+        const dy = n.y - node.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist > maxDist) maxDist = dist;
+      }
+      const minDim = Math.min(width, height) * dpr;
+      desiredScale = Math.max(0.45, Math.min(1.35, (minDim * 0.38) / Math.max(maxDist, 100)));
+    } else if (showNotice) {
+      desiredScale = Math.max(renderer.scale || 1.0, 1.25);
+    }
+
+    const targetPanX = (width / 2) * dpr - node.x * desiredScale;
+    const targetPanY = (height / 2) * dpr - node.y * desiredScale;
+
+    renderer.panvX = 0;
+    renderer.panvY = 0;
+    renderer.targetScale = desiredScale;
+    if (renderer.setScale) renderer.setScale(desiredScale);
+    if (renderer.setPan) renderer.setPan(targetPanX, targetPanY);
+    renderer.highlightNode = node;
+    if (renderer.changed) renderer.changed();
+
+    if (showNotice) {
+      const shortName = filePath.split("/").pop()?.replace(/\.md$/i, "") || filePath;
+      new Notice(`🎯 중심·원형 정렬 완료: ${shortName}`, 1500);
+    }
+    return true;
+  }
+
+  private getDirectNeighborhood(renderer: GraphRenderer, centerNode: GraphNode, centerId: string): GraphNode[] {
+    const result: GraphNode[] = [centerNode];
+    const seen = new Set<string>([centerId]);
+    const links = renderer.links || [];
+    for (let i = 0, len = links.length; i < len; i++) {
+      const l = links[i];
+      const sId = typeof l.source === "string" ? l.source : l.source?.id || l.source?.path || "";
+      const tId = typeof l.target === "string" ? l.target : l.target?.id || l.target?.path || "";
+      if (sId === centerId && tId && !seen.has(tId)) {
+        seen.add(tId);
+        const n = renderer.nodeLookup ? renderer.nodeLookup[tId] : undefined;
+        if (n) result.push(n);
+      } else if (tId === centerId && sId && !seen.has(sId)) {
+        seen.add(sId);
+        const n = renderer.nodeLookup ? renderer.nodeLookup[sId] : undefined;
+        if (n) result.push(n);
+      }
+    }
+    return result;
   }
 
   private highlightNodes(renderer: GraphRenderer, selected: GraphNode[]): void {
     if (!renderer) return;
-    const selectedIds = new Set(selected.map((n) => n.id));
+    const selectedIds = new Set<string>();
+    for (let i = 0, len = selected.length; i < len; i++) {
+      selectedIds.add(selected[i].id);
+    }
     const all = renderer.nodes || [];
-    for (const node of all) {
-      node.highlighted = selectedIds.has(node.id);
+    for (let i = 0, len = all.length; i < len; i++) {
+      all[i].highlighted = selectedIds.has(all[i].id);
     }
     if (renderer.changed) renderer.changed();
   }
 
   private handleGlobalKeyDown(evt: KeyboardEvent): void {
+    const activeEl = document.activeElement;
+    if (
+      activeEl &&
+      (activeEl.tagName === "INPUT" ||
+        activeEl.tagName === "TEXTAREA" ||
+        (activeEl as HTMLElement).isContentEditable)
+    ) {
+      return;
+    }
+
+    // Alt + G -> Open or focus Local Graph
+    if (evt.altKey && !evt.ctrlKey && !evt.shiftKey && evt.code === "KeyG") {
+      evt.preventDefault();
+      evt.stopPropagation();
+      this.openOrFocusLocalGraph();
+      return;
+    }
+
     const active = this.getActiveGraphLeaf();
     if (!active) return;
     const renderer = this.getRenderer(active);
     if (!renderer) return;
 
-    // Ctrl+Z inside Graph View -> Undo
+    if (!evt.ctrlKey && !evt.altKey && !evt.metaKey) {
+      if (evt.code === "KeyF" || evt.code === "Space" || evt.code === "Digit0") {
+        evt.preventDefault();
+        evt.stopPropagation();
+        this.detectActiveFile();
+        if (this.activeFilePath) {
+          this.scheduleCenterAndOrbit(active, this.activeFilePath, true);
+        }
+      } else if (evt.code === "KeyO") {
+        evt.preventDefault();
+        evt.stopPropagation();
+        const enh = this.enhancedLeaves.get(active);
+        if (enh) {
+          this.circularLocked = !this.circularLocked;
+          enh.toolbar.refreshState();
+          if (this.circularLocked && this.activeFilePath) {
+            this.executeCenterAndOrbit(active, this.activeFilePath, true);
+          } else {
+            CircularLayoutEngine.wakeSimulation(renderer, true);
+          }
+        }
+      } else if (
+        active.view.getViewType() === "localgraph" &&
+        (evt.code === "Digit1" || evt.code === "Digit2" || evt.code === "Digit3")
+      ) {
+        evt.preventDefault();
+        evt.stopPropagation();
+        const depth = parseInt(evt.code.replace("Digit", ""), 10);
+        const eng = (active.view as any)?.engine;
+        if (eng && eng.options) {
+          eng.options.localJumps = depth;
+          if (typeof eng.render === "function") eng.render();
+          if (this.activeFilePath) {
+            this.scheduleCenterAndOrbit(active, this.activeFilePath, false);
+          }
+        }
+        this.refreshAllToolbars();
+      }
+      return;
+    }
+
+    // Ctrl+Z -> Undo
     if ((evt.ctrlKey || evt.metaKey) && !evt.shiftKey && evt.code === "KeyZ") {
       if (this.history.canUndo()) {
         evt.preventDefault();
@@ -226,6 +534,28 @@ export default class GraphProNextPlugin extends Plugin {
         this.history.redo(renderer);
       }
     }
+  }
+
+  private async openOrFocusLocalGraph(): Promise<void> {
+    this.detectActiveFile();
+    if (!this.activeFilePath) return;
+
+    const localLeaves = this.app.workspace.getLeavesOfType("localgraph");
+    let leaf = localLeaves.length > 0 ? localLeaves[0] : null;
+
+    if (!leaf) {
+      leaf = this.app.workspace.getLeaf("split", "vertical");
+      await leaf.setViewState({
+        type: "localgraph",
+        active: true,
+        state: { file: this.activeFilePath },
+      });
+    } else {
+      this.app.workspace.revealLeaf(leaf);
+    }
+
+    this.enhanceLeaf(leaf);
+    this.scheduleCenterAndOrbit(leaf, this.activeFilePath, true);
   }
 
   async loadSettings() {
